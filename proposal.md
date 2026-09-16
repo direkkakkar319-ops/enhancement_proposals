@@ -1,4 +1,4 @@
-## Replace Hardcoded pandas Assumptions with narwhals for DataFrame-Agnostic Data Ingestion
+## Replace Hardcoded `pandas` Assumptions with `narwhals` for DataFrame-Agnostic Data Ingestion
 
 Contributors: **[`@direkkakkar319`](https://github.com/direkkakkar319-ops)**
 
