@@ -53,5 +53,42 @@ Wrap DataFrames at entry points, operate through narwhals' common API internally
 
 ### Details of Proposed Solution
 
+#### Migration Strategy
+
+Implementation proceeds **bottom-up**: migrate the pandas-heaviest utility layer first (since everything depends on it), then work upward through the estimator base, concrete estimators, CI tests, and finally the model-level APIs. This will ensure each layer can be tested in isolation before its consumers are migrated.
+
+```
+Implementation order (bottom-up)          Runtime data flow (top-down)
+============================              ==========================
+
+Step 1: Utility Layer                     User passes DataFrame
+  tabular.py, utils.py                            |
+      ^                                           v
+      |                               --------------------------
+Step 2: Estimator Base Layer           | Layer 5: Model APIs      |  model.fit(), predict()
+  base.py (_initialize_fit)            --------------------------
+      ^                                           |
+      |                               --------------------------
+Step 3: Concrete Estimator             | Layer 4: Causal Discovery|  PC, GES, HillClimb
+  discrete_mle.py (pilot)              --------------------------
+      ^                                           |
+      |                               --------------------------
+Step 4: CI Tests                       | Layer 3: CI Tests        |  ChiSquare, FisherZ
+  power_divergence.py                  --------------------------
+      ^                                           |
+      |                               --------------------------
+Step 5: Model APIs                     | Layer 2: Estimator Base  |  nw.from_native(df) here
+  DiscreteBayesianNetwork.py           --------------------------
+                                                  |
+                                       --------------------------
+                                       | Layer 1: Utilities       |  narwhals DataFrame ops
+                                       |  (preprocess_data,       |
+                                       |   get_state_counts, etc.)|
+                                       --------------------------
+                                                  |
+                                       --------------------------
+                                       | Numpy Boundary           |  .to_numpy() -- stops here
+                                       |  (TabularCPD, bincount)  |
+```
 
 ### User Journeys with the Solution
