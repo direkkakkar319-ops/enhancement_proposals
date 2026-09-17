@@ -91,4 +91,69 @@ Step 5: Model APIs                     | Layer 2: Estimator Base  |  nw.from_nat
                                        |  (TabularCPD, bincount)  |
 ```
 
+#### Key Files and Transformations
+
+The files below are listed in **implementation order** - each depends only on layers already migrated.
+
+---
+
+**Step 1a: **[`tabular.py`](pgmpy/utils/tabular.py)** - **[`collect_state_names()`](pgmpy/utils/tabular.py#L7)** , **[`build_state_names()`](pgmpy/utils/tabular.py#L12)**   (Utility Layer)**
+
+The pandas-heaviest helpers. These are called by every discrete estimator. Migration starts here.
+```python
+# Before
+def collect_state_names(data: pd.DataFrame, variable: str) -> list:
+    return sorted(list(data.loc[:, variable].dropna().unique()))
+
+# After
+def collect_state_names(data: nw.DataFrame, variable: str) -> list:
+    return sorted(data[variable].drop_nulls().unique().to_list())
+```
+
+**references**
+
+**[`docs-"drop_nuls()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/#narwhals.dataframe.DataFrame.drop_nulls)**
+
+**[`docs-"to_list()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.to_list)**
+
+---
+
+**Step 1b: **[`tabular.py`](pgmpy/utils/tabular.py)** - **[`get_state_counts()`](pgmpy/utils/tabular.py#L92)**   **(Utility Layer)**
+
+The hardest function to migrate: uses `groupby(...).size().unstack()`, `pd.MultiIndex.from_product`, and `.reindex()`. The proposed approach is to route through the existing `get_state_counts_array()` (which already operates on integer codes + numpy), avoiding the pandas-heavy path entirely:
+
+```python
+# The narwhals migration keeps the fast numpy path via encode_columns + get_state_counts_array
+# and only changes the input/output wrapping:
+
+def get_state_counts(data, state_names, variable, parents=(), sample_weight=None, reindex=True):
+    codes, cardinalities = encode_columns(data, state_names)
+    counts_array = get_state_counts_array(codes, cardinalities, variable, parents, sample_weight)
+    # Return as numpy array directly -- TabularCPD only needs np.array(state_counts)
+    return counts_array
+```
+
+further we also have to update the **[`discrete_mle.py`](pgmpy\parameter_estimator\discrete_mle.py)**
+as here: 
+```python
+    @staticmethod
+    def _estimate_cpd(model, data, state_names: dict, node, sample_weight=None) -> TabularCPD:
+        parents = sorted(model.get_parents(node))
+        state_counts = get_state_counts(............)
+        state_counts.iloc[:, (state_counts.values == 0).all(axis=0)] = 1.0
+        ......
+```
+
+the `get_state_count()` used to use `iloc()` but after the update:
+```python
+# Before (pandas)
+state_counts.iloc[:, (state_counts.values == 0).all(axis=0)] = 1.0
+
+# After (numpy array)
+zero_cols = (state_counts == 0).all(axis=0)
+state_counts[:, zero_cols] = 1.0
+```
+
+---
+
 ### User Journeys with the Solution
