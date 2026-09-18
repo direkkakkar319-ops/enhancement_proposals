@@ -156,4 +156,54 @@ state_counts[:, zero_cols] = 1.0
 
 ---
 
+**Step 1c: **[`unitls.py`](pgmpy/utils/utils.py)** - **[`preprocess_data()`](pgmpy/utils/utils.py#L293)**  (Utility Layer)**
+
+Every discrete estimator calls this first. Heavy `pd.api.types.*` usage for dtype inference:
+
+```python
+# Before (pandas-only)
+import pandas as pd
+
+def preprocess_data(df):
+    df = df.copy()
+    dtypes = {}
+    for col in df.columns:
+        if pd.api.types.is_integer_dtype(df[col]):
+            df[col] = df[col].astype("int")
+            dtypes[col] = "N"
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            dtypes[col] = "N"
+        elif pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]):
+            dtypes[col] = "C"
+            df[col] = df[col].astype("category")
+        # ...
+    return (df, dtypes)
+
+
+# After (narwhals-compatible)
+# No nw.from_native() needed here - _initialize_fit() already wraps the
+# DataFrame before calling preprocess_data().
+import narwhals as nw
+
+def preprocess_data(df):
+    dtypes = {}
+    for col in df.columns:
+        col_dtype = df[col].dtype
+        if col_dtype.is_numeric():
+            dtypes[col] = "N"
+        elif col_dtype == nw.String or col_dtype == nw.Categorical:
+            dtypes[col] = "C"
+        elif isinstance(col_dtype, nw.Categorical) and col_dtype.is_ordered():
+            dtypes[col] = "O"
+        # ...
+    return (df, dtypes)
+
+# Modified (our change)
+def _initialize_fit(self, model, data, sample_weight=None):
+    data = nw.from_native(data) # updated and used narhwhals here
+    data, _ = preprocess_data(data)
+    ............
+
+```
+
 ### User Journeys with the Solution
