@@ -235,9 +235,29 @@ for col in df.columns:
     .........
 ```
 
+---
+
 > **NOTE**:
 >  For performance-critical paths, we may keep `pd.factorize()` as an optimized specialization when the input is pandas, and use the narwhals path for other backends. This is a detail to decide during implementation.
 
+**Step 5: **[`DiscreteBayesianNetwork.py`](pgmpy/models/DiscreteBayesianNetwork.py)** - [`fit()`](pgmpy/models/DiscreteBayesianNetwork.py#L602), **[`predict()`](pgmpy/models/DiscreteBayesianNetwork.py#L730)**, **[`simulate()`](pgmpy/models/DiscreteBayesianNetwork.py#L1393)** **(Model APIs)**
+
+Highest-level public APIs accepting DataFrames. Check whether `fit()` just passes `data` through to an estimator (in which case Step 2 already handles the wrapping) or does its own pandas operations that also need migration.
+
 ---
+
+#### Phased Rollout
+
+| Phase | Scope | Key Files |
+|-------|-------|-----------|
+| **0. Pilot** | Single estimator end-to-end | `discrete_mle.py`, `base.py`, `tabular.py`, `utils.py` |
+| **1. Parameter Estimators** | All discrete + Gaussian estimators | `discrete_bayesian.py`, `discrete_em.py`, `linear_gaussian_mle.py` |
+| **2. CI Tests** | All conditional independence tests | `power_divergence.py`, `fisher_z.py`, `pearsonr.py`, `pillai_trace.py` |
+| **3. Structure Scores** | All scoring functions | `BDeu`, `BDs`, `BIC`, `AIC`, `K2`, `LogLikelihood` |
+| **4. Causal Discovery** | Search algorithms | `PC`, `GES`, `HillClimbSearch`, `ChowLiu` |
+| **5. Model APIs** | Top-level model methods | `DiscreteBayesianNetwork.fit()`, `.predict()`, `.simulate()` |
+
+Work for the phases will be done by seperate PRs.(this is divided into different phases as the pd.DataFrame is used in many source code files)
+
 
 ### User Journeys with the Solution
