@@ -260,5 +260,12 @@ Highest-level public APIs accepting DataFrames. Check whether `fit()` just passe
 
 Work for the phases will be done by seperate PRs.(this is divided into different phases as the pd.DataFrame is used in many source code files)
 
+#### **Testing**
+
+Each migrated module will include parameterized tests that run the same assertions across multiple backends
+
+Optional backends (`Polars`, `PyArrow`) will be guarded with `pytest.importorskip()` so CI doesn't fail if they aren't installed.
+
+---
 
 ### User Journeys with the Solution
