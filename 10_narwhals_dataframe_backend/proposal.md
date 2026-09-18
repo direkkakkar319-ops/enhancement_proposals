@@ -5,7 +5,8 @@ Contributors: **[`@direkkakkar319`](https://github.com/direkkakkar319-ops)**
 
 ### Introduction
 
-Related issues: **[`Issue 3395`](https://github.com/pgmpy/pgmpy/issues/3395)**.
+This proposal addresses the narwhals part of **[`Issue 3395`](https://github.com/pgmpy/pgmpy/issues/3395)**.
+It complements the maintainer's architectural design in **[`PR #14`](https://github.com/pgmpy/enhancement_proposals/pull/14)** by **[`@ankurankan`](https://github.com/ankurankan)**
 
 pgmpy currently hardcodes `pandas.DataFrame` as the only accepted tabular input type across its entire public API-parameter estimators, conditional independence tests, structure scores, causal discovery algorithms, and model-level methods like `fit()`, `predict()`, and `simulate()`.
 
