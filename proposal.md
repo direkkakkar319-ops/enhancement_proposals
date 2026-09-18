@@ -206,4 +206,38 @@ def _initialize_fit(self, model, data, sample_weight=None):
 
 ```
 
+**Step 3: **[`discreate_mle.py`](pgmpy/parameter_estimator/discrete_mle.py)** - **[`fit()`](pgmpy/parameter_estimator/discrete_mle.py#L91)**, **[`_estimate_cpd()`](pgmpy/parameter_estimator/discrete_mle.py#L65)** (Pilot Target)**
+
+Trace the full flow end-to-end: `fit()` --> `_initialize_fit()` --> `preprocess_data()` --> `build_state_names()` ->> per-node: `_estimate_cpd()` --> `get_state_counts()` --> `TabularCPD(np.array(state_counts))`. The pandas dataFrame becomes a numpy array at the `TabularCPD` boundary.
+
+---
+
+**Step 4: **[`power_divergence.py`](pgmpy/ci_tests/power_divergence.py)** - **[`__init__`](pgmpy/ci_tests/power_divergence.py#L130)** (CI Test Layer)**
+
+Different pandas usage pattern than estimators - column selection and `pd.factorize()` for encoding. Narwhals doesn't expose `factorize` directly, but the same result can be achieved:
+
+```python
+# Before
+for col in data.columns:
+    codes, uniques = pd.factorize(data[col], sort=False, use_na_sentinel=True)
+    self._codes[col] = np.ascontiguousarray(codes, dtype=np.int64)
+    .........
+
+# After
+df = nw.from_native(data)
+for col in df.columns:
+    col_series = df[col]
+    unique_vals = col_series.drop_nulls().unique().sort().to_list()
+    val_to_code = {v: i for i, v in enumerate(unique_vals)}
+    native_values = col_series.to_list()
+    codes = np.array([val_to_code.get(v, -1) for v in native_values], dtype=np.int64)
+    self._codes[col] = codes
+    .........
+```
+
+> **NOTE**:
+>  For performance-critical paths, we may keep `pd.factorize()` as an optimized specialization when the input is pandas, and use the narwhals path for other backends. This is a detail to decide during implementation.
+
+---
+
 ### User Journeys with the Solution
