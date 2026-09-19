@@ -12,7 +12,7 @@ It complements the maintainer's architectural design in **[`PR #14`](https://git
 pgmpy currently hardcodes `pandas.DataFrame` as the only accepted tabular input type across its entire public API-parameter estimators, conditional independence tests, structure scores, causal discovery algorithms, and model-level methods like `fit()`, `predict()`, and `simulate()`.
 
 This creates several practical problems like:
-1. **Ecosystem lock-in.** Users working with **[`Polars`​](https://github.com/pola-rs/polars)** , **[`PyArrow`​](https://github.com/apache/arrow)** , **[`cuDF`​](https://github.com/rapidsai/cudf)** or **[`Modin`​](https://github.com/modin-project/modin)** must manually convert their data to pandas before calling any pgmpy function, and convert back afterward.
+1. **Ecosystem lock-in.** Users working with **[`Polars`](https://github.com/pola-rs/polars)** , **[`PyArrow`](https://github.com/apache/arrow)** , **[`cuDF`](https://github.com/rapidsai/cudf)** or **[`Modin`](https://github.com/modin-project/modin)** must manually convert their data to pandas before calling any pgmpy function, and convert back afterward.
 
 2. **Unnecessary data copies.** These conversions often force a full materialization of the data in memory. For GPU-resident data (e.g., `cuDF` DataFrames), this means an expensive device-to-host transfer and memory duplication. For lazy frames (`Polars Lazy`, `Modin`), it forces eager evaluation.
 
@@ -58,7 +58,7 @@ Wrap DataFrames at entry points, operate through narwhals' common API internally
 - **Pros:** Zero-copy. True multi-backend support. Single code path to maintain. Narwhals is well-maintained and adopted by scikit-lego, Hamilton, and other ecosystem libraries. Lightweight dependency.
 - **Cons:** Requires migrating internal pandas idioms to narwhals equivalents. Some advanced pandas operations (e.g., `pd.MultiIndex`, `pd.Categorical`) have no direct narwhals equivalent and require restructuring. One-time migration effort.
 
-**Conclusion:** Option 3 is the clear winner. It provides genuine multi-backend support with minimal ongoing maintenance.
+**Conclusion:** Option 2 is the clear winner. It provides genuine multi-backend support with minimal ongoing maintenance.
 
 ---
 
@@ -132,7 +132,7 @@ def collect_state_names(data: nw.DataFrame, variable: str) -> list:
 
 ---
 
-**Step 1b: **[`tabular.py`](pgmpy/utils/tabular.py)** - **[`get_state_counts()`](pgmpy/utils/tabular.py#L92)**   **(Utility Layer)**
+**Step 1b: **[`tabular.py`](pgmpy/utils/tabular.py)** - **[`get_state_counts()`](pgmpy/utils/tabular.py#L32)** **(Utility Layer)**
 
 The hardest function to migrate: uses `groupby(...).size().unstack()`, `pd.MultiIndex.from_product`, and `.reindex()`. The proposed approach is to route through the existing `get_state_counts_array()` (which already operates on integer codes + numpy), avoiding the pandas-heavy path entirely:
 
@@ -140,7 +140,6 @@ The hardest function to migrate: uses `groupby(...).size().unstack()`, `pd.Multi
 # Before
 def get_state_counts(data, state_names, variable, parents=(), sample_weight=None, reindex=True):
     parents = list(parents)
-
     if sample_weight is None:
         if not parents:
             state_count_data = data.loc[:, variable].value_counts()
@@ -150,55 +149,16 @@ def get_state_counts(data, state_names, variable, parents=(), sample_weight=None
         ...
 
 # After
-# The narwhals migration keeps the fast numpy path via encode_columns + get_state_counts_array
-# and only changes the input/output wrapping:
 def get_state_counts(data, state_names, variable, parents=(), sample_weight=None, reindex=True):
     codes, cardinalities = encode_columns(data, state_names)
     counts_array = get_state_counts_array(codes, cardinalities, variable, parents, sample_weight)
-    # Return as numpy array directly -- TabularCPD only needs np.array(state_counts)
+    # Return as 2D numpy array directly -- downstream TabularCPD expects a numpy array
     return counts_array
-```
-
-further we also have to update the **[`discrete_mle.py`](pgmpy\parameter_estimator\discrete_mle.py)**
-as here: 
-```python
-# Before
-    @staticmethod
-    def _estimate_cpd(model, data, state_names: dict, node, sample_weight=None) -> TabularCPD:
-        parents = sorted(model.get_parents(node))
-        state_counts = get_state_counts(
-            data=data,
-            state_names=state_names,
-            variable=node,
-            parents=parents,
-            sample_weight=sample_weight,
-        )
-        state_counts.iloc[:, (state_counts.values == 0).all(axis=0)] = 1.0
-        ......
-
-
-# After
-    @staticmethod
-    def _estimate_cpd(model, data, state_names: dict, node, sample_weight=None) -> TabularCPD:
-        parents = sorted(model.get_parents(node))
-        state_counts = get_state_counts(............)
-        state_counts.iloc[:, (state_counts.values == 0).all(axis=0)] = 1.0
-        ......
-```
-
-the `get_state_count()` used to use `iloc()` but after the update:
-```python
-# Before (pandas)
-state_counts.iloc[:, (state_counts.values == 0).all(axis=0)] = 1.0
-
-# After (numpy array)
-zero_cols = (state_counts == 0).all(axis=0)
-state_counts[:, zero_cols] = 1.0
 ```
 
 ---
 
-**Step 1c: **[`unitls.py`](pgmpy/utils/utils.py)** - **[`preprocess_data()`](pgmpy/utils/utils.py#L293)**  (Utility Layer)**
+**Step 1c: **[`utils.py`](pgmpy/utils/utils.py)** - **[`preprocess_data()`](pgmpy/utils/utils.py#L293)**  (Utility Layer)**
 
 Every discrete estimator calls this first. Heavy `pd.api.types.*` usage for dtype inference:
 
@@ -239,23 +199,98 @@ def preprocess_data(df):
             dtypes[col] = "O"
         # ...
     return (df, dtypes)
+```
 
-# Modified (our change)
+---
+
+**Step 2: **[`base.py`](pgmpy/parameter_estimator/base.py)** - **[`_initialize_fit()`](pgmpy/parameter_estimator/base.py#L172)** (Estimator Base Layer)**
+
+This is the primary entry gate for all parameter estimators. Wrapping data here with `nw.from_native()` ensures estimators receive a narwhals-compatible DataFrame:
+
+```python
+# Before
 def _initialize_fit(self, model, data, sample_weight=None):
-    data = nw.from_native(data) # updated and used narhwhals here
-    data, _ = preprocess_data(data)
-    ............
+    self._data, self._dtypes = preprocess_data(data)
+    self._model = model
+    self._sample_weight = sample_weight
+    self.state_names_ = self._build_fitted_state_names(model, self._data)
+
+# After
+def _initialize_fit(self, model, data, sample_weight=None):
+    data = nw.from_native(data)
+    self._data, self._dtypes = preprocess_data(data)
+    self._model = model
+    self._sample_weight = sample_weight
+    self.state_names_ = self._build_fitted_state_names(model, self._data)
 ```
 
 **reference-docs**
 
-**[`docs-"from_native()"`](https://narwhals-dev.github.io/narwhals/api-reference/schema/?h=from_native#narwhals.schema.Schema.from_native)**
+**[`docs-"from_native()"`](https://narwhals-dev.github.io/narwhals/api-reference/narwhals/#narwhals.from_native)**
 
 ---
 
-**Step 3: **[`discreate_mle.py`](pgmpy/parameter_estimator/discrete_mle.py)** - **[`fit()`](pgmpy/parameter_estimator/discrete_mle.py#L91)**, **[`_estimate_cpd()`](pgmpy/parameter_estimator/discrete_mle.py#L65)** (Pilot Target)**
+**Step 3: **[`discrete_mle.py`](pgmpy/parameter_estimator/discrete_mle.py)** - **[`fit()`](pgmpy/parameter_estimator/discrete_mle.py#L91)**, **[`_estimate_cpd()`](pgmpy/parameter_estimator/discrete_mle.py#L65)** (Pilot Target)**
 
-Trace the full flow end-to-end: `fit()` --> `_initialize_fit()` --> `preprocess_data()` --> `build_state_names()` ->> per-node: `_estimate_cpd()` --> `get_state_counts()` --> `TabularCPD(np.array(state_counts))`. The pandas dataFrame becomes a numpy array at the `TabularCPD` boundary.
+Trace the full flow end-to-end: `fit()` --> `_initialize_fit()` --> `preprocess_data()` --> `build_state_names()` --> per-node: `_estimate_cpd()` --> `get_state_counts()` --> `TabularCPD(state_counts)`. The DataFrame becomes a numpy array at the `TabularCPD` boundary.
+
+Since `get_state_counts()` in Step 1b returns a 2D numpy array directly, `_estimate_cpd()` avoids pandas `.iloc` and `.values` in favor of pure numpy operations:
+
+```python
+# Before (pandas DataFrame)
+@staticmethod
+def _estimate_cpd(model, data, state_names: dict, node, sample_weight=None) -> TabularCPD:
+    parents = sorted(model.get_parents(node))
+    state_counts = get_state_counts(
+        data=data,
+        state_names=state_names,
+        variable=node,
+        parents=parents,
+        sample_weight=sample_weight,
+    )
+    state_counts.iloc[:, (state_counts.values == 0).all(axis=0)] = 1.0
+
+    parents_cardinalities = [len(state_names[parent]) for parent in parents]
+    node_cardinality = len(state_names[node])
+
+    cpd = TabularCPD(
+        node,
+        node_cardinality,
+        np.array(state_counts),
+        evidence=parents,
+        evidence_card=parents_cardinalities,
+        state_names={var: state_names[var] for var in chain([node], parents)},
+    )
+    cpd.normalize()
+    return cpd
+
+# After (NumPy 2D Array from get_state_counts)
+@staticmethod
+def _estimate_cpd(model, data, state_names: dict, node, sample_weight=None) -> TabularCPD:
+    parents = sorted(model.get_parents(node))
+    state_counts = get_state_counts(
+        data=data,
+        state_names=state_names,
+        variable=node,
+        parents=parents,
+        sample_weight=sample_weight,
+    )
+    state_counts[:, (state_counts == 0).all(axis=0)] = 1.0
+
+    parents_cardinalities = [len(state_names[parent]) for parent in parents]
+    node_cardinality = len(state_names[node])
+
+    cpd = TabularCPD(
+        node,
+        node_cardinality,
+        state_counts,
+        evidence=parents,
+        evidence_card=parents_cardinalities,
+        state_names={var: state_names[var] for var in chain([node], parents)},
+    )
+    cpd.normalize()
+    return cpd
+```
 
 ---
 
@@ -283,7 +318,7 @@ for col in df.columns:
 ```
 
 **reference-docs**
-**[`docs-"from_native()"`](https://narwhals-dev.github.io/narwhals/api-reference/schema/?h=from_native#narwhals.schema.Schema.from_native)**
+**[`docs-"from_native()"`](https://narwhals-dev.github.io/narwhals/api-reference/narwhals/#narwhals.from_native)**
 
 **[`docs-"unique()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/?h=unique#narwhals.dataframe.DataFrame.unique)**
 
@@ -315,13 +350,13 @@ Highest-level public APIs accepting DataFrames. Check whether `fit()` just passe
 | **4. Causal Discovery** | Search algorithms | `PC`, `GES`, `HillClimbSearch`, `ChowLiu` |
 | **5. Model APIs** | Top-level model methods | `DiscreteBayesianNetwork.fit()`, `.predict()`, `.simulate()` |
 
-Work for the phases will be done by seperate PRs.(this is divided into different phases as the pd.DataFrame is used in many source code files)
+Work for the phases will be done by separate PRs (this is divided into different phases as `pd.DataFrame` is used across many source files).
 
 ---
 
 #### **Testing**
 
-Each migrated module will include parameterized tests that run the same assertions across multiple backends
+Each migrated module will include parameterized tests that run the same assertions across multiple backends.
 
 Optional backends (`Polars`, `PyArrow`) will be guarded with `pytest.importorskip()` so CI doesn't fail if they aren't installed.
 
@@ -404,5 +439,3 @@ pc = PC(ci_test=ci_test)
 model = pc.estimate()
 print(model.edges())
 ```
-
-----
