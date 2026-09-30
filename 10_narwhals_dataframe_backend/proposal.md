@@ -168,7 +168,7 @@ array([[2.0, 0.0],[1.0, 1.0]])
 
 **Functions to migrate:** [`preprocess_data()`](pgmpy/utils/utils.py#L293)
 
-Every discrete estimator calls this first. Heavy `pd.api.types.*` usage for dtype inference:
+Every discrete estimator calls this first. Heavy `pd.api.types.*` usage for dtype inference and mutates columns in-place with `df[col] = df[col].astype("category")`. Polars and PyArrow DataFrames are immutable, so narwhals does not allow item assignment. Instead, we use `df.with_columns()` to reconstruct the dataframe with the casted columns:
 
 ```python
 # Before (pandas-only)
@@ -190,26 +190,32 @@ def preprocess_data(df):
     return (df, dtypes)
 
 
-# After (narwhals-compatible)
+# After (narwhals-compatible, uses with_columns)
 # No nw.from_native() needed
 # DataFrame before calling preprocess_data().
 import narwhals as nw
 
 def preprocess_data(df):
     dtypes = {}
+    casts = []
     for col in df.columns:
         col_dtype = df[col].dtype
         if col_dtype.is_numeric():
             dtypes[col] = "N"
-        elif col_dtype == nw.String or col_dtype == nw.Categorical:
+        elif col_dtype == nw.String:
             dtypes[col] = "C"
-        elif isinstance(col_dtype, nw.Categorical) and col_dtype.is_ordered():
-            dtypes[col] = "O"
+            casts.append(nw.col(col).cast(nw.Categorical))
+        elif col_dtype == nw.Categorical:
+            dtypes[col] = "C"
         # ...
+
+    if casts:
+        df = df.with_columns(casts)
+
     return (df, dtypes)
 ```
 
-**Backward compatibility:** Fully backward compatible. The function receives whatever DataFrame type `_initialize_fit()` passes in. When that is a narwhals-wrapped pandas DataFrame, behavior is identical.
+**Backward compatibility:** Fully backward compatible. `with_columns` returns a new DataFrame with the casted columns, preserving the original behavior of returning a transformed DataFrame. When the input is a narwhals-wrapped pandas DataFrame, `nw.col(col).cast(nw.Categorical)` maps to `pd.Categorical` under the hood.
 
 ---
 
