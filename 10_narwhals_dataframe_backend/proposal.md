@@ -206,8 +206,17 @@ def preprocess_data(df):
             dtypes[col] = "C"
             casts.append(nw.col(col).cast(nw.Categorical))
         elif col_dtype == nw.Categorical:
-            dtypes[col] = "C"
-        # ...
+            if nw.is_ordered_categorical(df[col]):
+                dtypes[col] = "O"
+            else:
+                dtypes[col] = "C"
+        elif col_dtype == nw.Enum:
+            dtypes[col] = "O"
+        else:
+            raise ValueError(
+                f"Couldn't infer datatype of column: {col} from data. "
+                "Try specifying the appropriate datatype to the column."
+            )
 
     if casts:
         df = df.with_columns(casts)
@@ -247,7 +256,7 @@ def _initialize_fit(self, model, data, sample_weight=None):
 **Backward compatibility:** Fully backward compatible. `nw.from_native()` on a pandas DataFrame returns a narwhals-wrapped pandas DataFrame. All downstream code works the same.
 
 **narwhals docs:**
-[`from_native()`](https://narwhals-dev.github.io/narwhals/api-reference/narwhals/#narwhals.from_native)
+[`docs-"from_native()"`](https://narwhals-dev.github.io/narwhals/api-reference/narwhals/#narwhals.from_native)
 
 ---
 
