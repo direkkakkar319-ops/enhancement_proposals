@@ -8,7 +8,6 @@ Contributors: **[`@direkkakkar319`](https://github.com/direkkakkar319-ops)**
 
 This proposal addresses the narwhals part of **[`Issue 3395`](https://github.com/pgmpy/pgmpy/issues/3395)**.
 It complements the maintainer's architectural design in **[`PR #14`](https://github.com/pgmpy/enhancement_proposals/pull/14)** by **[`@ankurankan`](https://github.com/ankurankan)**
-
 pgmpy currently hardcodes `pandas.DataFrame` as the only accepted tabular input type across its entire public API-parameter estimators, conditional independence tests, structure scores, causal discovery algorithms, and model-level methods like `fit()`, `predict()`, and `simulate()`.
 
 This creates several practical problems like:
@@ -18,21 +17,21 @@ This creates several practical problems like:
 
 3. **Maintenance burden.** The codebase uses pandas-specific idioms (`pd.api.types.is_integer_dtype`, `pd.factorize`, `groupby(...).size().unstack()`, `pd.MultiIndex`, `pd.Categorical`, etc.) in many source files. Every new feature must be written against `Pandas` internals, and any upstream  `Pandas` deprecation requires a sweep across the entire codebase.
 
-4. **Growing ecosystem fragmentation.** `Polars`, adoption is accelerating rapidly. Libraries that accept only `Pandas` are increasingly perceived as legacy. Supporting multiple DataFrame backends positions `Pgmpy` for long-term relevance.
+4. **Growing ecosystem fragmentation.** `Polars`, adoption is accelerating rapidly. Libraries that accept only `Pandas` are increasingly seen as legacy. Supporting multiple DataFrame backends positions `Pgmpy` for long-term relevance.
 
 ---
 
 ### Proposed Solution
 
 Introduce `narwhals` as a lightweight compatibility layer between pgmpy's internal logic and the user's DataFrame library.
-Narwhals provides a Polars-inspired API that wraps native DataFrames *without copying data*. 
-It supports pandas, Polars, PyArrow, cuDF, Modin, and other backends, and has zero required dependencies — it only uses libraries the user already has installed.
+Narwhals provides a Polars-inspired API that wraps native DataFrames *without copying data*.
+It supports pandas, Polars, PyArrow, cuDF, Modin, and other backends, and has zero required dependencies. It only uses libraries the user already has installed.
 
 **Core pattern:** At each public API entry point (estimator `.fit()`, CI test `__init__`, model `.fit()` / `.predict()` / `.simulate()`), wrap the incoming DataFrame using `nw.from_native(df)`, perform all internal operations using the narwhals API, and convert back to the user's native format via `.to_native()` before returning.
 
 **What does NOT change:**
 - The internal factor/inference layer continues to operate on numpy arrays (or torch tensors via `array-api-compat` in the future). The narwhals boundary stops at the point where data is converted into `numpy` arrays for numerical computation.
-- All existing pandas-based user code continues to work identically — pandas is a first-class narwhals backend.
+- All existing pandas-based user code continues to work identically. pandas is a first-class narwhals backend.
 
 **Dependency:** `narwhals` is a zero-dependency, lightweight package. We will have to add it as a core dependency in `pyproject.toml`.
 
@@ -47,7 +46,7 @@ Accept any DataFrame type, immediately convert to pandas via `nw.from_native(Dat
 **[`docs-"to_pandas()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/#narwhals.dataframe.DataFrame.to_pandas)**
 
 - **Pros:** Minimal code changes. Existing internal logic stays untouched.
-- **Cons:** Defeats the purpose. Users still pay the conversion cost (memory copy, GPU-to-CPU transfer). Polars lazy evaluation is forced eager. No real multi-backend support — just syntactic sugar over `.to_pandas()`.
+- **Cons:** Defeats the purpose. Users still pay the conversion cost (memory copy, GPU-to-CPU transfer). Polars lazy evaluation is forced eager. No real multi-backend support, just syntactic sugar over `.to_pandas()`.
 
 ---
 
@@ -64,54 +63,40 @@ Wrap DataFrames at entry points, operate through narwhals' common API internally
 
 ### Details of Proposed Solution
 
-#### Migration Strategy
+#### Overview
 
-Implementation proceeds **bottom-up**: migrate the pandas-heaviest utility layer first (since everything depends on it), then work upward through the estimator base, concrete estimators, CI tests, and finally the model-level APIs. This will ensure each layer can be tested in isolation before its consumers are migrated.
+The migration is organized by module. Each module below can be migrated as a separate backward-compatible PR(as advised). The modules are listed in dependency order - earlier modules have no dependencies on later ones, so they can be merged first.
+
+The narwhals boundary is simple: `nw.from_native(data)` is called once at each entry gate. There are two entry gates - one for estimators (`_initialize_fit` in `base.py`) and one for CI tests (`__init__` in `power_divergence.py`). Everything downstream receives a narwhals DataFrame and works with the narwhals API. At the numpy boundary (TabularCPD, `np.bincount`), data gets converted to numpy arrays and narwhals is no longer involved.
 
 ```
-Implementation order (bottom-up)          Runtime data flow (top-down)
-============================              ==========================
+Runtime data flow:
 
-Step 1: Utility Layer                     User passes DataFrame
-  tabular.py, utils.py                            |
-      ^                                           v
-      |                               --------------------------
-Step 2: Estimator Base Layer           | Layer 5: Model APIs      |  model.fit(), predict()
-  base.py (_initialize_fit)            --------------------------
-      ^                                           |
-      |                               --------------------------
-Step 3: Concrete Estimator             | Layer 4: Causal Discovery|  PC, GES, HillClimb
-  discrete_mle.py (pilot)              --------------------------
-      ^                                           |
-      |                               --------------------------
-Step 4: CI Tests                       | Layer 3: CI Tests        |  ChiSquare, FisherZ
-  power_divergence.py                  --------------------------
-      ^                                           |
-      |                               --------------------------
-Step 5: Model APIs                     | Layer 2: Estimator Base  |  nw.from_native(df) here
-  DiscreteBayesianNetwork.py           --------------------------
-                                                  |
-                                       --------------------------
-                                       | Layer 1: Utilities       |  narwhals DataFrame ops
-                                       |  (preprocess_data,       |
-                                       |   get_state_counts, etc.)|
-                                       --------------------------
-                                                  |
-                                       --------------------------
-                                       | Numpy Boundary           |  .to_numpy() -- stops here
-                                       |  (TabularCPD, bincount)  |
+  User passes pandas/polars/pyarrow DataFrame
+                    |
+                    v
+  Entry Gate: nw.from_native(data)
+  (base.py _initialize_fit  OR  power_divergence.py __init__)
+                    |
+                    v
+  Internal functions use narwhals API
+  (preprocess_data, collect_state_names, get_state_counts, etc.)
+                    |
+                    v
+  Numpy Boundary: .to_numpy() / np.array()
+  (TabularCPD, bincount)
 ```
----
-
-#### Key Files and Transformations
-
-The files below are listed in **implementation order** - each depends only on layers already migrated.
 
 ---
 
-**Step 1a: **[`tabular.py`](pgmpy/utils/tabular.py)** - **[`collect_state_names()`](pgmpy/utils/tabular.py#L7)** , **[`build_state_names()`](pgmpy/utils/tabular.py#L12)**   (Utility Layer)**
+#### Module: `pgmpy/utils/tabular.py`
 
-The pandas-heaviest helpers. These are called by every discrete estimator. Migration starts here.
+**Depends on:** Nothing (leaf module)
+
+**Functions to migrate:** [`collect_state_names()`](pgmpy/utils/tabular.py#L7), [`build_state_names()`](pgmpy/utils/tabular.py#L12), [`get_state_counts()`](pgmpy/utils/tabular.py#L32)
+
+`collect_state_names` and `build_state_names` are called by every discrete estimator.
+
 ```python
 # Before
 def collect_state_names(data: pd.DataFrame, variable: str) -> list:
@@ -129,10 +114,6 @@ def collect_state_names(data: nw.DataFrame, variable: str) -> list:
 **[`docs-"to_list()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.to_list)**
 
 **[`docs-"unique()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/?h=unique#narwhals.dataframe.DataFrame.unique)**
-
----
-
-**Step 1b: **[`tabular.py`](pgmpy/utils/tabular.py)** - **[`get_state_counts()`](pgmpy/utils/tabular.py#L32)** **(Utility Layer)**
 
 The hardest function to migrate: uses `groupby(...).size().unstack()`, `pd.MultiIndex.from_product`, and `.reindex()`. The proposed approach is to route through the existing `get_state_counts_array()` (which already operates on integer codes + numpy), avoiding the pandas-heavy path entirely:
 
@@ -156,9 +137,36 @@ def get_state_counts(data, state_names, variable, parents=(), sample_weight=None
     return counts_array
 ```
 
+**Backward compatibility:** The return type of `get_state_counts` changes from `pd.DataFrame` to `np.ndarray`. All internal callers already do `np.array(state_counts)` immediately after calling this function, so the change is transparent. If external users depend on the DataFrame return type, a wrapper can be added.
+
+**Output difference**
+```python
+# for this input
+df = pd.DataFrame({"B": [0, 0, 0, 1], "A": [0, 0, 1, 1]})
+get_state_counts(
+    data=df,
+    state_names={"A": [0, 1], "B": [0, 1]},
+    variable="A",  # The variable we want to count
+    parents=["B"],  # Its parent(s)
+)
+
+# Before -- this was converted by the estimator in numpy format after the input `np.array(state_counts)`
+B     0    1
+A           
+0   2.0  0.0
+1   1.0  1.0
+
+# After
+array([[2.0, 0.0],[1.0, 1.0]])
+
+```
 ---
 
-**Step 1c: **[`utils.py`](pgmpy/utils/utils.py)** - **[`preprocess_data()`](pgmpy/utils/utils.py#L293)**  (Utility Layer)**
+#### Module: `pgmpy/utils/utils.py`
+
+**Depends on:** Nothing (leaf module)
+
+**Functions to migrate:** [`preprocess_data()`](pgmpy/utils/utils.py#L293)
 
 Every discrete estimator calls this first. Heavy `pd.api.types.*` usage for dtype inference:
 
@@ -183,7 +191,7 @@ def preprocess_data(df):
 
 
 # After (narwhals-compatible)
-# No nw.from_native() needed here - `_initialize_fit()` already wraps the
+# No nw.from_native() needed
 # DataFrame before calling preprocess_data().
 import narwhals as nw
 
@@ -201,11 +209,17 @@ def preprocess_data(df):
     return (df, dtypes)
 ```
 
+**Backward compatibility:** Fully backward compatible. The function receives whatever DataFrame type `_initialize_fit()` passes in. When that is a narwhals-wrapped pandas DataFrame, behavior is identical.
+
 ---
 
-**Step 2: **[`base.py`](pgmpy/parameter_estimator/base.py)** - **[`_initialize_fit()`](pgmpy/parameter_estimator/base.py#L172)** (Estimator Base Layer)**
+#### Module: `pgmpy/parameter_estimator/base.py`
 
-This is the primary entry gate for all parameter estimators. Wrapping data here with `nw.from_native()` ensures estimators receive a narwhals-compatible DataFrame:
+**Depends on:** `tabular.py`, `utils.py`
+
+**Functions to migrate:** [`_initialize_fit()`](pgmpy/parameter_estimator/base.py#L172)
+
+This is the primary entry gate for all parameter estimators. Adding `nw.from_native()` every estimator's `fit()` method gets narwhals support automatically:
 
 ```python
 # Before
@@ -224,20 +238,25 @@ def _initialize_fit(self, model, data, sample_weight=None):
     self.state_names_ = self._build_fitted_state_names(model, self._data)
 ```
 
-**reference-docs**
+**Backward compatibility:** Fully backward compatible. `nw.from_native()` on a pandas DataFrame returns a narwhals-wrapped pandas DataFrame. All downstream code works the same.
 
-**[`docs-"from_native()"`](https://narwhals-dev.github.io/narwhals/api-reference/narwhals/#narwhals.from_native)**
+**narwhals docs:**
+[`from_native()`](https://narwhals-dev.github.io/narwhals/api-reference/narwhals/#narwhals.from_native)
 
 ---
 
-**Step 3: **[`discrete_mle.py`](pgmpy/parameter_estimator/discrete_mle.py)** - **[`fit()`](pgmpy/parameter_estimator/discrete_mle.py#L91)**, **[`_estimate_cpd()`](pgmpy/parameter_estimator/discrete_mle.py#L65)** (Pilot Target)**
+#### Module: `pgmpy/parameter_estimator/discrete_mle.py`
 
-Trace the full flow end-to-end: `fit()` --> `_initialize_fit()` --> `preprocess_data()` --> `build_state_names()` --> per-node: `_estimate_cpd()` --> `get_state_counts()` --> `TabularCPD(state_counts)`. The DataFrame becomes a numpy array at the `TabularCPD` boundary.
+**Depends on:** `base.py`, `tabular.py`
 
-Since `get_state_counts()` in Step 1b returns a 2D numpy array directly, `_estimate_cpd()` avoids pandas `.iloc` and `.values` in favor of pure numpy operations:
+**Functions to migrate:** [`_estimate_cpd()`](pgmpy/parameter_estimator/discrete_mle.py#L65), [`fit()`](pgmpy/parameter_estimator/discrete_mle.py#L91)
+
+This is the pilot target for the migration. The full flow is: `fit()` -> `_initialize_fit()` -> `preprocess_data()` -> `build_state_names()` -> per-node: `_estimate_cpd()` -> `get_state_counts()` -> `TabularCPD(state_counts)`.
+
+Since `get_state_counts()` now returns a 2D numpy array (see `tabular.py` module above), `_estimate_cpd()` needs to use numpy indexing instead of pandas `.iloc` and `.values`:
 
 ```python
-# Before (pandas DataFrame)
+# Before
 @staticmethod
 def _estimate_cpd(model, data, state_names: dict, node, sample_weight=None) -> TabularCPD:
     parents = sorted(model.get_parents(node))
@@ -264,7 +283,7 @@ def _estimate_cpd(model, data, state_names: dict, node, sample_weight=None) -> T
     cpd.normalize()
     return cpd
 
-# After (NumPy 2D Array from get_state_counts)
+# After
 @staticmethod
 def _estimate_cpd(model, data, state_names: dict, node, sample_weight=None) -> TabularCPD:
     parents = sorted(model.get_parents(node))
@@ -292,11 +311,19 @@ def _estimate_cpd(model, data, state_names: dict, node, sample_weight=None) -> T
     return cpd
 ```
 
+**Backward compatibility:** Fully backward compatible. The `fit()` method still accepts pandas DataFrames. The internal change from `.iloc` to numpy indexing is transparent to users.
+
 ---
 
-**Step 4: **[`power_divergence.py`](pgmpy/ci_tests/power_divergence.py)** - **[`__init__`](pgmpy/ci_tests/power_divergence.py#L130)** (CI Test Layer)**
+#### Module: `pgmpy/ci_tests/power_divergence.py`
 
-Different pandas usage pattern than estimators - column selection and `pd.factorize()` for encoding. Narwhals doesn't expose `factorize` directly, but the same result can be achieved:
+**Depends on:** Nothing (independent entry gate)
+
+**Functions to migrate:** [`__init__()`](pgmpy/ci_tests/power_divergence.py#L130)
+
+CI tests have a different pandas usage pattern than estimators. They use column selection and `pd.factorize()` for encoding. This module has its own entry gate (separate from the estimator `_initialize_fit()`) since CI tests are not estimators.
+
+Narwhals does not expose `factorize` directly, but the same result can be achieved:
 
 ```python
 # Before
@@ -317,6 +344,8 @@ for col in df.columns:
     .........
 ```
 
+**Backward compatibility:** Fully backward compatible. pandas DataFrames are wrapped transparently.
+
 **reference-docs**
 **[`docs-"from_native()"`](https://narwhals-dev.github.io/narwhals/api-reference/narwhals/#narwhals.from_native)**
 
@@ -328,29 +357,44 @@ for col in df.columns:
 
 **[`docs-"to_list()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.to_list)**
 
----
-
 > **NOTE**:
 >  For performance-critical paths, we may keep `pd.factorize()` as an optimized specialization when the input is pandas, and use the narwhals path for other backends. This is a detail to decide during implementation.
 
-**Step 5: **[`DiscreteBayesianNetwork.py`](pgmpy/models/DiscreteBayesianNetwork.py)** - [`fit()`](pgmpy/models/DiscreteBayesianNetwork.py#L602), **[`predict()`](pgmpy/models/DiscreteBayesianNetwork.py#L730)**, **[`simulate()`](pgmpy/models/DiscreteBayesianNetwork.py#L1393)** **(Model APIs)**
+---
 
-Highest-level public APIs accepting DataFrames. Check whether `fit()` just passes `data` through to an estimator (in which case Step 2 already handles the wrapping) or does its own pandas operations that also need migration.
+#### Module: `pgmpy/models/DiscreteBayesianNetwork.py`
+
+**Depends on:** All estimator modules
+
+**Functions to audit:** [`fit()`](pgmpy/models/DiscreteBayesianNetwork.py#L602), [`predict()`](pgmpy/models/DiscreteBayesianNetwork.py#L730), [`simulate()`](pgmpy/models/DiscreteBayesianNetwork.py#L1393)
+
+These are the highest-level public APIs that accept DataFrames. `fit()` passes data through to an estimator, so the `_initialize_fit()` entry gate in `base.py` already handles the wrapping. The main work here is checking whether `fit()`, `predict()`, or `simulate()` do their own pandas operations that also need migration.
+
+**Backward compatibility:** Fully backward compatible once upstream modules are migrated.
 
 ---
 
-#### Phased Rollout
+#### Rollout Summary
 
-| Phase | Scope | Key Files |
-|-------|-------|-----------|
-| **0. Pilot** | Single estimator end-to-end | `discrete_mle.py`, `base.py`, `tabular.py`, `utils.py` |
-| **1. Parameter Estimators** | All discrete + Gaussian estimators | `discrete_bayesian.py`, `discrete_em.py`, `linear_gaussian_mle.py` |
-| **2. CI Tests** | All conditional independence tests | `power_divergence.py`, `fisher_z.py`, `pearsonr.py`, `pillai_trace.py` |
-| **3. Structure Scores** | All scoring functions | `BDeu`, `BDs`, `BIC`, `AIC`, `K2`, `LogLikelihood` |
-| **4. Causal Discovery** | Search algorithms | `PC`, `GES`, `HillClimbSearch`, `ChowLiu` |
-| **5. Model APIs** | Top-level model methods | `DiscreteBayesianNetwork.fit()`, `.predict()`, `.simulate()` |
+Each module above is a separate PR. The table below shows the merge order:
 
-Work for the phases will be done by separate PRs (this is divided into different phases as `pd.DataFrame` is used across many source files).
+| PR | Module | Backward Compatible |
+|----|--------|---------------------|
+| 1 | `pgmpy/utils/tabular.py` | Yes |
+| 2 | `pgmpy/utils/utils.py` | Yes |
+| 3 | `pgmpy/parameter_estimator/base.py` | Yes (depends on PR 1, 2) |
+| 4 | `pgmpy/parameter_estimator/discrete_mle.py` | Yes (depends on PR 3) |
+| 5 | `pgmpy/ci_tests/power_divergence.py` | Yes (independent) |
+| 6 | `pgmpy/models/DiscreteBayesianNetwork.py` | Yes (depends on PR 3, 4) |
+
+After the pilot modules above, the same pattern extends to the rest of the codebase:
+
+| Scope | Modules |
+|-------|---------|
+| Remaining parameter estimators | `discrete_bayesian.py`, `discrete_em.py`, `linear_gaussian_mle.py` |
+| Remaining CI tests | `fisher_z.py`, `pearsonr.py`, `pillai_trace.py` |
+| Structure scores | `BDeu`, `BDs`, `BIC`, `AIC`, `K2`, `LogLikelihood` |
+| Causal discovery | `PC`, `GES`, `HillClimbSearch`, `ChowLiu` |
 
 ---
 
@@ -371,7 +415,6 @@ import pandas as pd
 from pgmpy.models import DiscreteBayesianNetwork
 from pgmpy.parameter_estimator import DiscreteMLE
 
-# Existing code works identically -- zero breaking changes
 data = pd.DataFrame({"A": [0, 1, 0, 1], "B": [1, 0, 1, 0]})
 model = DiscreteBayesianNetwork([("A", "B")])
 estimator = DiscreteMLE()
@@ -386,7 +429,6 @@ import polars as pl
 from pgmpy.models import DiscreteBayesianNetwork
 from pgmpy.parameter_estimator import DiscreteMLE
 
-# Users can now pass Polars DataFrames directly -- no .to_pandas() needed
 data = pl.DataFrame({"A": [0, 1, 0, 1], "B": [1, 0, 1, 0]})
 model = DiscreteBayesianNetwork([("A", "B")])
 estimator = DiscreteMLE()
@@ -406,7 +448,6 @@ table = pa.table({"X": np.random.randint(0, 2, 1000),
                    "Y": np.random.randint(0, 2, 1000),
                    "Z": np.random.randint(0, 3, 1000)})
 
-# PyArrow tables work directly with CI tests
 test = ChiSquare(data=table)
 result = test(X="X", Y="Y", Z=["Z"], significance_level=0.05)
 print(f"Independent: {result}, p-value: {test.p_value_:.4f}")
@@ -419,7 +460,6 @@ import cudf
 from pgmpy.models import DiscreteBayesianNetwork
 from pgmpy.parameter_estimator import DiscreteMLE
 
-# Data stays on GPU -- no CPU round-trip until the numpy boundary
 data = cudf.DataFrame({"A": [0, 1, 0, 1], "B": [1, 0, 1, 0]})
 model = DiscreteBayesianNetwork([("A", "B")])
 estimator = DiscreteMLE()
