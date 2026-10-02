@@ -93,7 +93,7 @@ Runtime data flow:
 
 **Depends on:** Nothing (leaf module)
 
-**Functions to migrate:** [`collect_state_names()`](pgmpy/utils/tabular.py#L7), [`build_state_names()`](pgmpy/utils/tabular.py#L12), [`get_state_counts()`](pgmpy/utils/tabular.py#L32)
+**Functions to migrate:** [`collect_state_names()`](pgmpy/utils/tabular.py#L7), [`build_state_names()`](pgmpy/utils/tabular.py#L12), [`get_state_counts()`](pgmpy/utils/tabular.py#L32), [`encode_columns()`](pgmpy/utils/tabular.py#L72)
 
 `collect_state_names` and `build_state_names` are called by every discrete estimator.
 
@@ -135,6 +135,32 @@ def get_state_counts(data, state_names, variable, parents=(), sample_weight=None
     counts_array = get_state_counts_array(codes, cardinalities, variable, parents, sample_weight)
     # Return as 2D numpy array directly -- downstream TabularCPD expects a numpy array
     return counts_array
+```
+
+
+To support this path without pandas, `encode_columns()` must also be migrated. Currently, it uses `pd.Categorical()` to generate the integer codes. Migrating it to Narwhals ensures the hot path stays completely backend-agnostic:
+
+```python
+# Before
+def encode_columns(data: pd.DataFrame, state_names: dict) -> tuple[dict, dict]:
+    codes = {}
+    cardinalities = {}
+    for col in data.columns:
+        cats = state_names[col]
+        cat = pd.Categorical(data[col], categories=cats)
+        codes[col] = np.asarray(cat.codes, dtype=np.int64)
+        ...
+
+# After
+def encode_columns(data: nw.DataFrame, state_names: dict) -> tuple[dict, dict]:
+    codes = {}
+    cardinalities = {}
+    for col in data.columns:
+        cats = state_names[col]
+        val_code = {v: i for i, v in enumerate(cats)}
+        cate = data[col].to_list()
+        codes[col] = np.array([val_code.get(v, -1) for v in col_values], dtype=np.int64)
+        ...
 ```
 
 **Backward compatibility:** The return type of `get_state_counts` changes from `pd.DataFrame` to `np.ndarray`. All internal callers already do `np.array(state_counts)` immediately after calling this function, so the change is transparent. If external users depend on the DataFrame return type, a wrapper can be added.
