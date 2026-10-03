@@ -7,7 +7,7 @@ Contributors: **[`@direkkakkar319`](https://github.com/direkkakkar319-ops)**
 ### Introduction
 
 This proposal addresses the narwhals part of **[`Issue 3395`](https://github.com/pgmpy/pgmpy/issues/3395)**.
-It complements the maintainer's architectural design in **[`PR #14`](https://github.com/pgmpy/enhancement_proposals/pull/14)** by **[`@ankurankan`](https://github.com/ankurankan)**
+It complements the maintainer's architectural design in **[`PR #14`](https://github.com/pgmpy/enhancement_proposals/pull/14)** by **[`@ankurankan`](https://github.com/ankurankan)**.
 pgmpy currently hardcodes `pandas.DataFrame` as the only accepted tabular input type across its entire public API-parameter estimators, conditional independence tests, structure scores, causal discovery algorithms, and model-level methods like `fit()`, `predict()`, and `simulate()`.
 
 This creates several practical problems like:
@@ -164,14 +164,12 @@ def encode_columns(data: nw.DataFrame, state_names: dict) -> tuple[dict, dict]:
 
 > **Performance note:** `data[col].to_list()` copies column data to a Python list. This is not zero-copy - for GPU-resident backends like `cuDF`, it triggers a device-to-host transfer. The overhead is comparable to the current `.to_pandas()` path for columns, but the benefit is that the narwhals call is backend-agnostic and avoids materializing the entire DataFrame. A future optimization could detect the pandas backend and fall back to `Index.get_indexer` directly.
 
-**Backward compatibility:** The return type of `get_state_counts` changes from `pd.DataFrame` to `np.ndarray`. This is a **public API break**. All **internal** callers already do `np.array(state_counts)` immediately after calling this function, so the change is transparent therefor the internal behavior is unchanged.
+**Backward compatibility:** The return type of `get_state_counts` changes from `pd.DataFrame` to `np.ndarray`. This is a **public API break**. All **internal** callers already do `np.array(state_counts)` immediately after calling this function, so the change is transparent therefore the internal behavior is unchanged.
 If external users depend on the DataFrame return type, we will:
 1. Keep `get_state_counts` returning a `pd.DataFrame` and add a new `get_state_counts_array` caller internally.
 2. Or add a `DeprecationWarning` for one release cycle before changing the return type.
 
 The preferred option during implementation will be decided with the maintainer.
-
-**Backward compatibility:** The return type of `get_state_counts` changes from `pd.DataFrame` to `np.ndarray`. All internal callers already do `np.array(state_counts)` immediately after calling this function, so the change is transparent. If external users depend on the DataFrame return type, a wrapper can be added.
 
 **Output difference**
 ```python
@@ -202,10 +200,10 @@ array([[2.0, 0.0],[1.0, 1.0]])
 
 **Functions to migrate:** [`preprocess_data()`](pgmpy/utils/utils.py#L293)
 
-Every discrete estimator calls this first. Heavy `pd.api.types.*` usage for dtype inference and mutates columns in-place with `df[col] = df[col].astype("category")`. Polars and PyArrow DataFrames are immutable, so narwhals does not allow item assignment. Instead, we use `df.with_columns()` to reconstruct the dataframe with the casted columns:
+Every discrete estimator calls this first. The current code uses `pd.api.types.*` for dtype inference and mutates columns in-place with `df[col] = df[col].astype("category")`. Polars and PyArrow DataFrames are immutable, so narwhals does not allow item assignment. Instead, we use `df.with_columns()` to reconstruct the dataframe with the casted columns:
 
 ```python
-# Before (pandas-only)
+# Before (pandas-only, mutates in-place)
 import pandas as pd
 
 def preprocess_data(df):
@@ -225,7 +223,7 @@ def preprocess_data(df):
 
 
 # After (narwhals-compatible, uses with_columns)
-# No nw.from_native() needed
+# nw.from_native() is NOT called here. _initialize_fit() already wraps the
 # DataFrame before calling preprocess_data().
 import narwhals as nw
 
@@ -258,7 +256,7 @@ def preprocess_data(df):
     return (df, dtypes)
 ```
 
-**Backward compatibility:** Fully backward compatible. `with_columns` returns a new DataFrame with the casted columns, preserving the original behavior of returning a transformed DataFrame. When the input is a narwhals-wrapped pandas DataFrame, `nw.col(col).cast(nw.Categorical)` maps to `pd.Categorical` under the hood.
+**Backward compatibility:** Fully backward compatible. `with_columns` returns a new DataFrame with the casted columns, preserving the original behavior of returning a transformed DataFrame. When the input is a narwhals-wrapped pandas DataFrame, `nw.col(col).cast(nw.Categorical)` maps to `pd.Categorical` under the hood. Ordered categoricals continue to be mapped to `"O"` preserving compatibility with existing tests.
 
 ---
 
@@ -290,7 +288,7 @@ def _initialize_fit(self, model, data, sample_weight=None):
 **Backward compatibility:** Fully backward compatible. `nw.from_native()` on a pandas DataFrame returns a narwhals-wrapped pandas DataFrame. All downstream code works the same.
 
 **narwhals docs:**
-[`docs-"from_native()"`](https://narwhals-dev.github.io/narwhals/api-reference/narwhals/#narwhals.from_native)
+[`from_native()`](https://narwhals-dev.github.io/narwhals/api-reference/narwhals/#narwhals.from_native)
 
 ---
 
@@ -393,16 +391,16 @@ for col in df.columns:
     .........
 ```
 
-> **Code ordering difference:** `pd.factorize(sort=False)` assigns codes in *first-seen* order, while `unique().sort()` assigns codes in *sorted* order. These produce different integer code assignments for same data. The narwhals path uses sorted order, which is like how `encode_columns` / `build_state_names` works elsewhere in pgmpy (state names are always sorted). The CI test result (p-value, statistic) is order-independent  only the contingency table cell counts matter, not which integer maps to which label. However, this difference must be documented and tested to avoid surprises.
+> **Code ordering difference:** `pd.factorize(sort=False)` assigns codes in *first-seen* order, while `unique().sort()` assigns codes in *sorted* order. These produce different integer code assignments for same data. The narwhals path uses sorted order, which is like how `encode_columns` / `build_state_names` works elsewhere in pgmpy (state names are always sorted). The CI test result (p-value, statistic) is order-independent - only the contingency table cell counts matter, not which integer maps to which label. However, this difference must be documented and tested to avoid surprises.
 
 **Backward compatibility:** Fully backward compatible for external users -the p-value and test decision are identical. pandas DataFrames are wrapped transparently.
 
 **reference-docs**
 **[`docs-"from_native()"`](https://narwhals-dev.github.io/narwhals/api-reference/narwhals/#narwhals.from_native)**
 
-**[`docs-"unique()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/?h=unique#narwhals.dataframe.DataFrame.unique)**
+**[`docs-"unique()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.unique)**
 
-**[`docs-"sort()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/?h=sort#narwhals.dataframe.DataFrame.sort)**
+**[`docs-"sort()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.sort)**
 
 **[`docs-"drop_nulls()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/#narwhals.dataframe.DataFrame.drop_nulls)**
 
