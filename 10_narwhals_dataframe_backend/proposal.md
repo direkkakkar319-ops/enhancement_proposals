@@ -132,13 +132,10 @@ def get_state_counts(data, state_names, variable, parents=(), sample_weight=None
 # After
 def get_state_counts(data, state_names, variable, parents=(), sample_weight=None, reindex=True):
     codes, cardinalities = encode_columns(data, state_names)
-    counts_array = get_state_counts_array(codes, cardinalities, variable, parents, sample_weight)
-    # Return as 2D numpy array directly -- downstream TabularCPD expects a numpy array
-    return counts_array
+    return get_state_counts_array(codes, cardinalities, variable, parents, sample_weight)
 ```
 
-
-To support this path without pandas, `encode_columns()` must also be migrated. Currently, it uses `pd.Categorical()` to generate the integer codes. Migrating it to Narwhals ensures the hot path stays completely backend-agnostic:
+To support this path without pandas, `encode_columns()` must also be migrated. Narwhals does not expose `Index.get_indexer`, but the same result can be achieved with a dictionary lookup. The current code already uses `Index.get_indexer` (not `pd.Categorical`), so the mapping is straightforward:
 
 ```python
 # Before
@@ -147,9 +144,10 @@ def encode_columns(data: pd.DataFrame, state_names: dict) -> tuple[dict, dict]:
     cardinalities = {}
     for col in data.columns:
         cats = state_names[col]
-        cat = pd.Categorical(data[col], categories=cats)
-        codes[col] = np.asarray(cat.codes, dtype=np.int64)
-        ...
+        idx = pd.Index(cats)
+        codes[col] = np.asarray(idx.get_indexer(data[col]), dtype=np.int64)
+        cardinalities[col] = len(cats)
+    return codes, cardinalities
 
 # After
 def encode_columns(data: nw.DataFrame, state_names: dict) -> tuple[dict, dict]:
@@ -157,11 +155,21 @@ def encode_columns(data: nw.DataFrame, state_names: dict) -> tuple[dict, dict]:
     cardinalities = {}
     for col in data.columns:
         cats = state_names[col]
-        val_code = {v: i for i, v in enumerate(cats)}
-        cate = data[col].to_list()
+        val_code = {v: i for i, v in enumerate(cats)}  # equivalent to Index.get_indexer
+        col_values = data[col].to_list()
         codes[col] = np.array([val_code.get(v, -1) for v in col_values], dtype=np.int64)
-        ...
+        cardinalities[col] = len(cats)
+    return codes, cardinalities
 ```
+
+> **Performance note:** `data[col].to_list()` copies column data to a Python list. This is not zero-copy - for GPU-resident backends like `cuDF`, it triggers a device-to-host transfer. The overhead is comparable to the current `.to_pandas()` path for columns, but the benefit is that the narwhals call is backend-agnostic and avoids materializing the entire DataFrame. A future optimization could detect the pandas backend and fall back to `Index.get_indexer` directly.
+
+**Backward compatibility:** The return type of `get_state_counts` changes from `pd.DataFrame` to `np.ndarray`. This is a **public API break**. All **internal** callers already do `np.array(state_counts)` immediately after calling this function, so the change is transparent therefor the internal behavior is unchanged.
+If external users depend on the DataFrame return type, we will:
+1. Keep `get_state_counts` returning a `pd.DataFrame` and add a new `get_state_counts_array` caller internally.
+2. Or add a `DeprecationWarning` for one release cycle before changing the return type.
+
+The preferred option during implementation will be decided with the maintainer.
 
 **Backward compatibility:** The return type of `get_state_counts` changes from `pd.DataFrame` to `np.ndarray`. All internal callers already do `np.array(state_counts)` immediately after calling this function, so the change is transparent. If external users depend on the DataFrame return type, a wrapper can be added.
 
@@ -385,7 +393,9 @@ for col in df.columns:
     .........
 ```
 
-**Backward compatibility:** Fully backward compatible. pandas DataFrames are wrapped transparently.
+> **Code ordering difference:** `pd.factorize(sort=False)` assigns codes in *first-seen* order, while `unique().sort()` assigns codes in *sorted* order. These produce different integer code assignments for same data. The narwhals path uses sorted order, which is like how `encode_columns` / `build_state_names` works elsewhere in pgmpy (state names are always sorted). The CI test result (p-value, statistic) is order-independent  only the contingency table cell counts matter, not which integer maps to which label. However, this difference must be documented and tested to avoid surprises.
+
+**Backward compatibility:** Fully backward compatible for external users -the p-value and test decision are identical. pandas DataFrames are wrapped transparently.
 
 **reference-docs**
 **[`docs-"from_native()"`](https://narwhals-dev.github.io/narwhals/api-reference/narwhals/#narwhals.from_native)**
@@ -494,7 +504,7 @@ result = test(X="X", Y="Y", Z=["Z"], significance_level=0.05)
 print(f"Independent: {result}, p-value: {test.p_value_:.4f}")
 ```
 
-#### 4. `cuDF` User on G.P.U (No Device Transfer)
+#### 4. `cuDF` User on G.P.U
 
 ```python
 import cudf
@@ -507,16 +517,15 @@ estimator = DiscreteMLE()
 estimator.fit(model, data)
 ```
 
+> **Note:** The narwhals boundary does not guarantee zero device-to-host transfer for GPU-resident DataFrames. `encode_columns` calls `.to_list()` on each column, which copies column data to a Python list and pulls cuDF data to host memory. This is the same cost as calling `.to_pandas()` on individual columns. The benefit is that the full DataFrame is never materialized as a pandas DataFrame; only the columns needed for encoding are touched. A future CUDA-native `np.bincount` path (e.g., via CuPy) could eliminate this transfer entirely.
+
 #### 5. Causal Discovery with `Polars`
 
 ```python
 import polars as pl
 from pgmpy.causal_discovery import PC
-from pgmpy.ci_tests import ChiSquare
 
 data = pl.read_csv("my_dataset.csv")
-ci_test = ChiSquare(data=data)
-pc = PC(ci_test=ci_test)
-model = pc.estimate()
+model = PC(ci_test="chi_square").fit(data)
 print(model.edges())
 ```
