@@ -135,7 +135,7 @@ def get_state_counts(data, state_names, variable, parents=(), sample_weight=None
     return get_state_counts_array(codes, cardinalities, variable, parents, sample_weight)
 ```
 
-To support this path without pandas, `encode_columns()` must also be migrated. Narwhals does not expose `Index.get_indexer`, but the same result can be achieved with a dictionary lookup. The current code already uses `Index.get_indexer` (not `pd.Categorical`), so the mapping is straightforward:
+To support this path without pandas, `encode_columns()` must also be migrated. The current code uses `Index.get_indexer` (not `pd.Categorical`). The narwhals-idiomatic replacement is [`Series.replace_strict(mapping, default=-1)`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.replace_strict), which maps values to integer codes natively within the narwhals layer and avoids a Python-level loop:
 
 ```python
 # Before
@@ -156,13 +156,14 @@ def encode_columns(data: nw.DataFrame, state_names: dict) -> tuple[dict, dict]:
     for col in data.columns:
         cats = state_names[col]
         val_code = {v: i for i, v in enumerate(cats)}  # equivalent to Index.get_indexer
-        col_values = data[col].to_list()
-        codes[col] = np.array([val_code.get(v, -1) for v in col_values], dtype=np.int64)
+        codes[col] = data[col].replace_strict(val_code, default=-1).to_numpy().astype(np.int64)
         cardinalities[col] = len(cats)
     return codes, cardinalities
 ```
 
-> **Performance note:** `data[col].to_list()` copies column data to a Python list. This is not zero-copy - for GPU-resident backends like `cuDF`, it triggers a device-to-host transfer. The overhead is comparable to the current `.to_pandas()` path for columns, but the benefit is that the narwhals call is backend-agnostic and avoids materializing the entire DataFrame. A future optimization could detect the pandas backend and fall back to `Index.get_indexer` directly.
+**[`docs-"replace_strict()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.replace_strict)**
+
+> **Performance note:** `replace_strict` operates within the narwhals layer, so the encoding happens natively in the backend engine (pandas, Polars, PyArrow, etc.) rather than in a Python-level loop. The final `.to_numpy()` call does copy data to a numpy array - for GPU-resident backends like cuDF, this triggers a device-to-host transfer, which is unavoidable since downstream computation (`np.bincount`) requires numpy. True GPU-native computation will be addressed in the array-api phase.
 
 **Backward compatibility:** The return type of `get_state_counts` changes from `pd.DataFrame` to `np.ndarray`. This is a **public API break**. All **internal** callers already do `np.array(state_counts)` immediately after calling this function, so the change is transparent therefore the internal behavior is unchanged.
 If external users depend on the DataFrame return type, we will:
