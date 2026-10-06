@@ -27,13 +27,15 @@ Introduce `narwhals` as a lightweight compatibility layer between pgmpy's intern
 Narwhals provides a Polars-inspired API that wraps native DataFrames *without copying data*.
 It supports pandas, Polars, PyArrow, cuDF, Modin, and other backends, and has zero required dependencies. It only uses libraries the user already has installed.
 
-**Core pattern:** At each public API entry point (estimator `.fit()`, CI test `__init__`, model `.fit()` / `.predict()` / `.simulate()`), wrap the incoming DataFrame using `nw.from_native(df)`, perform all internal operations using the narwhals API, and convert back to the user's native format via `.to_native()` before returning.
+**Core pattern:** At each public API entry point (estimator `.fit()`, CI test `__init__`, model `.fit()` / `.predict()` / `.simulate()`), wrap the incoming DataFrame using `nw.from_native(df, eager_only=True)`, perform all internal operations using the narwhals API, and convert back to the user's native format via `.to_native()` before returning.
 
 **What does NOT change:**
 - The internal factor/inference layer continues to operate on numpy arrays (or torch tensors via `array-api-compat` in the future). The narwhals boundary stops at the point where data is converted into `numpy` arrays for numerical computation.
 - All existing pandas-based user code continues to work identically. pandas is a first-class narwhals backend.
 
-**Dependency:** `narwhals` is a zero-dependency, lightweight package. We will have to add it as a core dependency in `pyproject.toml`.
+**Dependency & Compatibility Policy:**
+- **Pinning:** Add `narwhals>=2.11` as a core dependency in `pyproject.toml`. Version `>=2.11` is required because `replace_strict(..., default=...)`, which the contingency table encoding relies on, was introduced in Narwhals 2.11.
+- **Stable Import:** In all pgmpy codebase files, import from the stable API namespace: `import narwhals.stable.v2 as nw` rather than top-level `narwhals`. The `stable.v2` namespace provides a [backwards-compatibility guarantee](https://narwhals-dev.github.io/narwhals/backcompat/), ensuring that future Narwhals releases won't change behavior under pgmpy's feet.
 
 ---
 
@@ -226,7 +228,7 @@ def preprocess_data(df):
 # After (narwhals-compatible, uses with_columns)
 # nw.from_native() is NOT called here. _initialize_fit() already wraps the
 # DataFrame before calling preprocess_data().
-import narwhals as nw
+import narwhals.stable.v2 as nw
 
 def preprocess_data(df):
     dtypes = {}
