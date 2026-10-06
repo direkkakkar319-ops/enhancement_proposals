@@ -109,11 +109,11 @@ def collect_state_names(data: nw.DataFrame, variable: str) -> list:
 
 **reference-docs**
 
-**[`docs-"drop_nulls()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/#narwhals.dataframe.DataFrame.drop_nulls)**
+**[`docs-"drop_nulls()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.drop_nulls)**
 
 **[`docs-"to_list()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.to_list)**
 
-**[`docs-"unique()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/?h=unique#narwhals.dataframe.DataFrame.unique)**
+**[`docs-"unique()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.unique)**
 
 The hardest function to migrate: uses `groupby(...).size().unstack()`, `pd.MultiIndex.from_product`, and `.reindex()`. The proposed approach is to route through the existing `get_state_counts_array()` (which already operates on integer codes + numpy), avoiding the pandas-heavy path entirely:
 
@@ -403,7 +403,7 @@ for col in df.columns:
 
 **[`docs-"sort()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.sort)**
 
-**[`docs-"drop_nulls()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/#narwhals.dataframe.DataFrame.drop_nulls)**
+**[`docs-"drop_nulls()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.drop_nulls)**
 
 **[`docs-"to_list()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.to_list)**
 
