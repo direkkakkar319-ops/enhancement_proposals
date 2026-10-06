@@ -67,7 +67,7 @@ Wrap DataFrames at entry points, operate through narwhals' common API internally
 
 The migration is organized by module. Each module below can be migrated as a separate backward-compatible PR(as advised). The modules are listed in dependency order - earlier modules have no dependencies on later ones, so they can be merged first.
 
-The narwhals boundary is simple: `nw.from_native(data)` is called once at each entry gate. There are two entry gates - one for estimators (`_initialize_fit` in `base.py`) and one for CI tests (`__init__` in `power_divergence.py`). Everything downstream receives a narwhals DataFrame and works with the narwhals API. At the numpy boundary (TabularCPD, `np.bincount`), data gets converted to numpy arrays and narwhals is no longer involved.
+The narwhals boundary is simple: `nw.from_native(data, eager_only=True)` is called once at each entry gate. There are two entry gates - one for estimators (`_initialize_fit` in `base.py`) and one for CI tests (`__init__` in `power_divergence.py`). Eager-only enforcement ensures that if an uncollected LazyFrame (e.g. `polars.LazyFrame`) is passed, Narwhals immediately raises a clear error rather than failing unexpectedly downstream. Everything downstream receives an eager narwhals DataFrame and works with the narwhals API. At the numpy boundary (TabularCPD, `np.bincount`), data gets converted to numpy arrays and narwhals is no longer involved.
 
 ```
 Runtime data flow:
@@ -75,7 +75,7 @@ Runtime data flow:
   User passes pandas/polars/pyarrow DataFrame
                     |
                     v
-  Entry Gate: nw.from_native(data)
+  Entry Gate: nw.from_native(data, eager_only=True)
   (base.py _initialize_fit  OR  power_divergence.py __init__)
                     |
                     v
@@ -279,7 +279,7 @@ def _initialize_fit(self, model, data, sample_weight=None):
 
 # After
 def _initialize_fit(self, model, data, sample_weight=None):
-    data = nw.from_native(data)
+    data = nw.from_native(data, eager_only=True)
     self._data, self._dtypes = preprocess_data(data)
     self._model = model
     self._sample_weight = sample_weight
@@ -381,7 +381,7 @@ for col in data.columns:
     .........
 
 # After
-df = nw.from_native(data)
+df = nw.from_native(data, eager_only=True)
 for col in df.columns:
     col_series = df[col]
     unique_vals = col_series.drop_nulls().unique().sort().to_list()
