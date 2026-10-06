@@ -418,9 +418,19 @@ for col in df.columns:
 
 **Functions to audit:** [`fit()`](pgmpy/models/DiscreteBayesianNetwork.py#L602), [`predict()`](pgmpy/models/DiscreteBayesianNetwork.py#L730), [`simulate()`](pgmpy/models/DiscreteBayesianNetwork.py#L1393)
 
-These are the highest-level public APIs that accept DataFrames. `fit()` passes data through to an estimator, so the `_initialize_fit()` entry gate in `base.py` already handles the wrapping. The main work here is checking whether `fit()`, `predict()`, or `simulate()` do their own pandas operations that also need migration.
+1. **`fit()`**: Passes data directly to an estimator; the `_initialize_fit()` entry gate in `base.py` already handles the `nw.from_native(data, eager_only=True)` wrapping. Fully backward compatible.
 
-**Backward compatibility:** Fully backward compatible once upstream modules are migrated.
+2. **`predict()` (Index-less backend adaptation)**:
+   - Current implementation relies on the pandas index (`t.index.tolist()`, `complete_data.index = row`, `sort_index()`) to preserve row alignment for missing variables.
+   - Because Polars and PyArrow are index-less, `predict()` will be refactored to track rows via **positional integer indices** rather than relying on a pandas `Index`.
+   - Results are converted back to the input's native type via `.to_native()`. When the input is pandas, the original index is restored; when the input is an index-less backend (Polars, PyArrow), a standard native DataFrame is returned with rows matching the input order.
+
+3. **`simulate()` (Output type decision)**:
+   - Unlike ingestion methods, `simulate(n_samples=...)` generates synthetic data from scratch and does not receive an input DataFrame to infer a native type from.
+   - For backward compatibility, `simulate()` will continue to return a `pandas.DataFrame` by default.
+   - An optional `output_type: str = "pandas"` argument (supporting `"polars"`, `"pyarrow"`) will be introduced to allow generating native frames directly without manual user conversion.
+
+**Backward compatibility:** Fully backward compatible. Existing pandas workflows remain unchanged.
 
 ---
 
