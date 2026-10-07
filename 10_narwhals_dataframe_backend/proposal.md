@@ -13,7 +13,7 @@ pgmpy currently hardcodes `pandas.DataFrame` as the only accepted tabular input 
 This creates several practical problems like:
 1. **Ecosystem lock-in.** Users working with **[`Polars`](https://github.com/pola-rs/polars)** , **[`PyArrow`](https://github.com/apache/arrow)** , **[`cuDF`](https://github.com/rapidsai/cudf)** or **[`Modin`](https://github.com/modin-project/modin)** must manually convert their data to pandas before calling any pgmpy function, and convert back afterward.
 
-2. **Unnecessary data copies.** These conversions often force a full materialization of the data in memory. For GPU-resident data (e.g., `cuDF` DataFrames), this means an expensive device-to-host transfer and memory duplication. For lazy frames (`Polars Lazy`, `Modin`), it forces eager evaluation.
+2. **Unnecessary full pandas conversions.** Converting third-party DataFrames (e.g., Polars, PyArrow, cuDF) to pandas duplicates data in memory and forces users to pay the conversion overhead upfront. Supporting Narwhals lets pgmpy skip the full pandas conversion entirely, allowing each backend to perform column encoding natively.
 
 3. **Maintenance burden.** The codebase uses pandas-specific idioms (`pd.api.types.is_integer_dtype`, `pd.factorize`, `groupby(...).size().unstack()`, `pd.MultiIndex`, `pd.Categorical`, etc.) in many source files. Every new feature must be written against `Pandas` internals, and any upstream  `Pandas` deprecation requires a sweep across the entire codebase.
 
@@ -47,8 +47,8 @@ Accept any DataFrame type, immediately convert to pandas via `nw.from_native(Dat
 
 **[`docs-"to_pandas()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/#narwhals.dataframe.DataFrame.to_pandas)**
 
-- **Pros:** Minimal code changes. Existing internal logic stays untouched.
-- **Cons:** Defeats the purpose. Users still pay the conversion cost (memory copy, GPU-to-CPU transfer). Polars lazy evaluation is forced eager. No real multi-backend support, just syntactic sugar over `.to_pandas()`.
+- **Pros:** Minimal code changes. Existing internal logic stays untouched.This can serve as an initial **Phase 0 step**: adding `nw.from_native(data, eager_only=True).to_pandas()` at every public entry point gives users multi-backend input immediately across all pgmpy APIs, allowing subsequent modules to drop the conversion and migrate to native Narwhals incrementally.
+- **Cons:** Defeats the long-term purpose as an end state. Users still pay the full conversion overhead, memory duplication, and device-to-host transfer for cuDF. No multi-backend execution, merely an ingestion shim.
 
 ---
 
@@ -56,8 +56,8 @@ Accept any DataFrame type, immediately convert to pandas via `nw.from_native(Dat
 
 Wrap DataFrames at entry points, operate through narwhals' common API internally, return native types to the user.
 
-- **Pros:** Zero-copy. True multi-backend support. Single code path to maintain. Narwhals is well-maintained and adopted by scikit-lego, Hamilton, and other ecosystem libraries. Lightweight dependency.
-- **Cons:** Requires migrating internal pandas idioms to narwhals equivalents. Some advanced pandas operations (e.g., `pd.MultiIndex`, `pd.Categorical`) have no direct narwhals equivalent and require restructuring. One-time migration effort.
+- **Pros:** Zero-copy. True multi-backend support. Single code path to maintain. Narwhals is well-maintained and adopted by scikit-lego, Hamilton, and other ecosystem libraries [ecosystem libraries](https://narwhals-dev.github.io/narwhals/ecosystem/).Lightweight, zero-dependency
+- **Cons:** Requires migrating internal pandas idioms to narwhals equivalents. While categorical dtypes are supported via `nw.Categorical` and `nw.Enum`, operations relying on `pd.MultiIndex` have no direct equivalent and require restructuring. Narwhals provides pandas index interoperability helpers (`maybe_get_index`, `maybe_align_index`) to ease transitional paths. One-time migration effort.
 
 **Conclusion:** Option 2 is the clear winner. It provides genuine multi-backend support with minimal ongoing maintenance.
 
@@ -464,7 +464,10 @@ After the pilot modules above, the same pattern extends to the rest of the codeb
 
 Each migrated module will include parameterized tests that run the same assertions across multiple backends.
 
-Optional backends (`Polars`, `PyArrow`) will be guarded with `pytest.importorskip()` so CI doesn't fail if they aren't installed.
+We will adopt a backend parametrization pattern modeled after [Fairlearn's `test/conftest.py`](https://github.com/fairlearn/fairlearn/blob/main/test/conftest.py):
+- **Centralized Fixtures:** Pytest fixtures will parametrize incoming tabular data across `pandas`, `polars`, and `pyarrow`.
+- **Dynamic Skipping:** Optional backends (`polars`, `pyarrow`, `cudf`) will be guarded with `pytest.importorskip()` so tests run when the library is present and skip cleanly when not installed without failing CI.
+- **Backend Parity:** Assertions will verify exact parity across backends for learned parameters, state names ordering, contingency tables, and CI test statistics/p-values.
 
 ---
 
