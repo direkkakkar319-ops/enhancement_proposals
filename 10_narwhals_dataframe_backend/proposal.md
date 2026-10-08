@@ -105,11 +105,28 @@ def collect_state_names(data: pd.DataFrame, variable: str) -> list:
     return sorted(list(data.loc[:, variable].dropna().unique()))
 
 # After
+def _observed(s: nw.Series) -> nw.Series:
+    s = s.drop_nulls()
+    if s.dtype.is_float():
+        # NOTE: Polars/PyArrow keep NaN after drop_nulls, pandas doesn't
+        s = s.filter(~s.is_nan())
+    return s.unique()
+
+
 def collect_state_names(data: nw.DataFrame, variable: str) -> list:
-    return sorted(data[variable].drop_nulls().unique().to_list())
+    # Use get_column() to safely support integer column names (in Narwhals, data[0] selects row 0)
+    return _observed(data.get_column(variable)).sort().to_list()
 ```
 
+> **Difference in Pandas and Polars or PyArraws Behaviour:**
+> 1. **Null vs. NaN parity:** In pandas, `.dropna()` removes both `None` and float `NaN`. In Polars and PyArrow, `.drop_nulls()` only drops `None`, leaving float `NaN` in place. Filtering `~s.is_nan()` on float columns guarantees identical state collection across all backends.
+> 2. **Integer column names:** pgmpy variables can be integers or strings. In Narwhals, `data[0]` selects row 0, not column 0. Using `data.get_column(variable)` guarantees safe column selection for all hashable variable names.
+
 **reference-docs**
+
+**[`docs-"get_column()"`](https://narwhals-dev.github.io/narwhals/api-reference/dataframe/#narwhals.dataframe.DataFrame.get_column)**
+
+**[`docs-"is_nan()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.is_nan)**
 
 **[`docs-"drop_nulls()"`](https://narwhals-dev.github.io/narwhals/api-reference/series/#narwhals.series.Series.drop_nulls)**
 
