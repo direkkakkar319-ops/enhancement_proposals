@@ -173,9 +173,14 @@ def encode_columns(data: nw.DataFrame, state_names: dict) -> tuple[dict, dict]:
     codes = {}
     cardinalities = {}
     for col in data.columns:
+        s = data.get_column(col)
         cats = state_names[col]
         val_code = {v: i for i, v in enumerate(cats)}  # equivalent to Index.get_indexer
-        codes[col] = data[col].replace_strict(val_code, default=-1).to_numpy().astype(np.int64)
+        if (old := _observed(s)):
+            new = [val_code.get(v, -1) for v in old]
+            codes[col] = s.replace_strict(old, new, default=-1, return_dtype=nw.Int64).to_numpy()
+        else:
+            codes[col] = np.full(len(s), -1, dtype=np.int64)
         cardinalities[col] = len(cats)
     return codes, cardinalities
 ```
