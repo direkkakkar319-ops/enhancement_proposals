@@ -553,7 +553,7 @@ estimator = DiscreteMLE()
 estimator.fit(model, data)
 ```
 
-> **Note:** The narwhals boundary does not guarantee zero device-to-host transfer for GPU-resident DataFrames. `encode_columns` calls `.to_list()` on each column, which copies column data to a Python list and pulls cuDF data to host memory. This is the same cost as calling `.to_pandas()` on individual columns. The benefit is that the full DataFrame is never materialized as a pandas DataFrame; only the columns needed for encoding are touched. A future CUDA-native `np.bincount` path (e.g., via CuPy) could eliminate this transfer entirely.
+> **Note:** The narwhals boundary does not guarantee zero device-to-host transfer for GPU-resident DataFrames. `encode_columns` calls `.to_list()` on each column, which copies column data to a Python list and pulls cuDF data to host memory. This is the same cost as calling `.to_pandas()` on individual columns. The benefit is that the full DataFrame is never materialized as a pandas DataFrame; only the columns needed for encoding are touched. A future CUDA-native `np.bincount` path (e.g., via CuPy) could eliminate this transfer entirely. CuPy (or DLPack) export avoids CPU transfer but may allocate a new GPU buffer(**info**: https://github.com/NVIDIA/cudf/issues/10874) 
 
 #### 5. Causal Discovery with `Polars`
 
