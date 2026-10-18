@@ -1,152 +1,213 @@
-"""
-Proof of Concept (POC): DataFrame-Agnostic Causal Discovery via Narwhals
-Target: Chow-Liu
-
-Starting with BaseCausalDiscovery ?
-    As this the class that is the base class that every causal discovery algorithm inherits
-
-"""
-
-import warnings
-import networkx as nx
 import numpy as np
 import pandas as pd
 import polars as pl
-from sklearn.base import BaseEstimator
-from sklearn.metrics import mutual_info_score
-
+import pyarrow as pa
+import cudf as cd
+import modin.pandas as mpd
+import warnings
+warnings.filterwarnings("ignore")
 import narwhals.stable.v2 as nw
-from pgmpy.base import DAG
-
-# Upstream Narwhals compatibility fix:
-# ----- (will be removed after this is fixed: https://github.com/narwhals-dev/narwhals/issues/4089)
-try:
-    from narwhals._pandas_like import utils as _nw_utils
-
-    _orig_is_dtype_pyarrow = _nw_utils.is_dtype_pyarrow
-
-    def _safe_is_dtype_pyarrow(dtype):
-        try:
-            return _orig_is_dtype_pyarrow(dtype)
-        except TypeError:
-            return False
-
-    _nw_utils.is_dtype_pyarrow = _safe_is_dtype_pyarrow
-except Exception:
-    pass
-# -----
+from pgmpy.causal_discovery import ChowLiu
+from pgmpy.datasets import load_dataset
 
 
-class BaseCausalDiscovery(BaseEstimator):
+# 1. Discrete Dataset (Biological network: 11 categorical variables)
+df = load_dataset("sachs_discrete").data.sample(500, random_state=42)
 
-    def __sklearn_tags__(self):
-        tags = super().__sklearn_tags__()
-        tags.input_tags.categorical = True
-        tags.input_tags.allow_nan = False
-        tags.target_tags.required = False
-        return tags
+# ========
+# Pandas
+# ========
+est = ChowLiu()
+est.fit(df)
+print(f"Learned Edges(old):     {sorted(est.causal_graph_.edges())}")
 
-    def _check_fit_data(self, X):
-        """
-        DataFrame-agnostic validation via Narwhals.
-        Accepts: pandas, Polars, PyArrow, Modin, cuDF, or 2D numpy arrays.
-        """
-        if isinstance(X, np.ndarray):
-            if X.ndim != 2:
-                raise ValueError(f"Expected 2D array, got shape {X.shape}")
-            cols = [f"x{i}" for i in range(X.shape[1])]
-            X = pd.DataFrame(X, columns=cols)
+# ========
+# NumPy
+# ========
+numpy_array = df.to_numpy()
+est_numpy = ChowLiuNew()
+est_numpy.fit(numpy_array)
+print(f"Learned Edges(numpy):   {sorted(est_numpy.causal_graph_.edges())}")
 
-        nw_df = X if isinstance(X, nw.DataFrame) else nw.from_native(X, eager_only=True)
+# ========
+# Polars
+# ========
+polars_data = pl.DataFrame(df)
+est_polars = ChowLiuNew()
+est_polars.fit(nw.from_native(polars_data))
+print(f"Learned Edges(polars):  {sorted(est_polars.causal_graph_.edges())}")
 
-        n_samples, n_features = nw_df.shape
-        if n_features < 1 or n_samples < 2:
-            raise ValueError(f"Invalid shape: {nw_df.shape}")
+# ========
+# Pyarrow
+# ========
+pyarrow_data = pa.Table.from_pandas(df, preserve_index=False)
+est_pyarrow = ChowLiuNew()
+est_pyarrow.fit(nw.from_native(pyarrow_data))
+print(f"Learned Edges(pyarrow): {sorted(est_pyarrow.causal_graph_.edges())}")
 
-        for col in nw_df.columns:
-            s = nw_df.get_column(col)
-            null_count = s.is_null().sum()
-            try:
-                nan_count = s.is_nan().sum() if s.dtype.is_float() else 0
-            except (TypeError, AttributeError):
-                nan_count = 0
-            if (null_count + nan_count) > 0:
-                raise ValueError(f"Input contains NaN/null values in column '{col}'.")
+# ========
+# Modin
+# ========
+modin_data = mpd.DataFrame(df)
+est_modin = ChowLiuNew()
+est_modin.fit(nw.from_native(modin_data))
+print(f"Learned Edges(modin):   {sorted(est_modin.causal_graph_.edges())}")
 
-        self.feature_names_in_ = np.asarray(nw_df.columns, dtype=object)
-        self.n_features_in_ = n_features
-        return nw_df
-
-    def fit(self, X, y=None):
-        """
-        Public fit entry point. Validates data, runs zero-variance check,
-        and delegates to the algorithm's _fit implementation.
-        """
-        nw_df = self._check_fit_data(X)
-
-        for col in nw_df.columns:
-            if nw_df.get_column(col).n_unique() == 1:
-                warnings.warn(
-                    f"Variable '{col}' is constant (zero variance).",
-                    UserWarning,
-                    stacklevel=2,
-                )
-
-        return self._fit(nw_df)
+# ========
+# cuDF
+# ========
+cudf_data = cd.DataFrame(df)
+est_cudf = ChowLiuNew()
+est_cudf.fit(nw.from_native(cudf_data))
+print(f"Learned Edges(cudf):    {sorted(est_cudf.causal_graph_.edges())}")
 
 
-class _TreeSearchMixin:
-    """
-    Mixin providing tree-search algorithms (ChowLiu and TAN) with shared
-    mutual information weighting and MST graph construction.
-    """
+# 2. Discrete Survey Dataset (Social survey: 5 categorical variables)
+df = load_dataset("college_plans").data.sample(500, random_state=42)
 
-    @staticmethod
-    def _get_weights(data: nw.DataFrame, edge_weights_fn=mutual_info_score):
-        """Compute pairwise edge weights via Narwhals column extraction."""
-        cols = data.columns
-        n_vars = len(cols)
-        weights = np.zeros((n_vars, n_vars))
-        for i in range(n_vars):
-            u_vec = data.get_column(cols[i]).to_numpy()
-            for j in range(i + 1, n_vars):
-                v_vec = data.get_column(cols[j]).to_numpy()
-                w = edge_weights_fn(u_vec, v_vec)
-                weights[i, j] = weights[j, i] = w
-        return weights
+# ========
+# Pandas
+# ========
+est = ChowLiu()
+est.fit(df)
+print(f"Learned Edges(old):     {sorted(est.causal_graph_.edges())}")
 
-    @staticmethod
-    def _create_tree_and_dag(weights, columns, root_node):
-        """Construct NetworkX MST directly without pandas adjacency."""
-        n_vars = len(columns)
-        G = nx.Graph()
-        G.add_nodes_from(columns)
-        for i in range(n_vars):
-            for j in range(i + 1, n_vars):
-                G.add_edge(columns[i], columns[j], weight=weights[i, j])
+# ========
+# NumPy
+# ========
+numpy_array = df.to_numpy()
+est_numpy = ChowLiuNew()
+est_numpy.fit(numpy_array)
+print(f"Learned Edges(numpy):   {sorted(est_numpy.causal_graph_.edges())}")
 
-        mst = nx.maximum_spanning_tree(G)
-        directed_tree = nx.bfs_tree(mst, root_node)
-        return DAG(directed_tree)
+# ========
+# Polars
+# ========
+polars_data = pl.DataFrame(df)
+est_polars = ChowLiuNew()
+est_polars.fit(nw.from_native(polars_data))
+print(f"Learned Edges(polars):  {sorted(est_polars.causal_graph_.edges())}")
 
+# ========
+# Pyarrow
+# ========
+pyarrow_data = pa.Table.from_pandas(df, preserve_index=False)
+est_pyarrow = ChowLiuNew()
+est_pyarrow.fit(nw.from_native(pyarrow_data))
+print(f"Learned Edges(pyarrow): {sorted(est_pyarrow.causal_graph_.edges())}")
 
-class ChowLiuNew(_TreeSearchMixin, BaseCausalDiscovery):
-    """
-    Chow-Liu algorithm for learning tree-structured Bayesian networks.
-    Directly inherits from _TreeSearchMixin and BaseCausalDiscovery.
-    """
+# ========
+# Modin
+# ========
+modin_data = mpd.DataFrame(df)
+est_modin = ChowLiuNew()
+est_modin.fit(nw.from_native(modin_data))
+print(f"Learned Edges(modin):   {sorted(est_modin.causal_graph_.edges())}")
 
-    def __init__(self, root_node=None):
-        self.root_node = root_node
+# ========
+# cuDF
+# ========
+cudf_data = cd.DataFrame(df)
+est_cudf = ChowLiuNew()
+est_cudf.fit(nw.from_native(cudf_data))
+print(f"Learned Edges(cudf):    {sorted(est_cudf.causal_graph_.edges())}")
 
-    def _fit(self, nw_df: nw.DataFrame):
-        columns = nw_df.columns
+# 3. Mixed Dataset (Categorical + Integer: 9 demographic variables)
+df = load_dataset("contraceptive_method").data.dropna().sample(500, random_state=42)
 
-        weights = self._get_weights(nw_df)
+# ========
+# Pandas
+# ========
+est = ChowLiu()
+est.fit(df)
+print(f"Learned Edges(old):     {sorted(est.causal_graph_.edges())}")
 
-        root_node = self.root_node
-        if root_node is None:
-            root_node = columns[np.argmax(weights.sum(axis=0))]
+# ========
+# NumPy
+# ========
+numpy_array = df.to_numpy()
+est_numpy = ChowLiuNew()
+est_numpy.fit(numpy_array)
+print(f"Learned Edges(numpy):   {sorted(est_numpy.causal_graph_.edges())}")
 
-        self.causal_graph_ = self._create_tree_and_dag(weights, columns, root_node)
-        return self
+# ========
+# Polars
+# ========
+polars_data = pl.DataFrame(df)
+est_polars = ChowLiuNew()
+est_polars.fit(nw.from_native(polars_data))
+print(f"Learned Edges(polars):  {sorted(est_polars.causal_graph_.edges())}")
+
+# ========
+# Pyarrow
+# ========
+pyarrow_data = pa.Table.from_pandas(df, preserve_index=False)
+est_pyarrow = ChowLiuNew()
+est_pyarrow.fit(nw.from_native(pyarrow_data))
+print(f"Learned Edges(pyarrow): {sorted(est_pyarrow.causal_graph_.edges())}")
+
+# ========
+# Modin
+# ========
+modin_data = mpd.DataFrame(df)
+est_modin = ChowLiuNew()
+est_modin.fit(nw.from_native(modin_data))
+print(f"Learned Edges(modin):   {sorted(est_modin.causal_graph_.edges())}")
+
+# ========
+# cuDF
+# ========
+cudf_data = cd.DataFrame(df)
+est_cudf = ChowLiuNew()
+est_cudf.fit(nw.from_native(cudf_data))
+print(f"Learned Edges(cudf):    {sorted(est_cudf.causal_graph_.edges())}")
+
+# 4. Continuous Dataset (Flow cytometry: 11 float variables)
+df = load_dataset("sachs_continuous").data.sample(500, random_state=42)
+
+# ========
+# Pandas
+# ========
+est = ChowLiu()
+est.fit(df)
+print(f"Learned Edges(old):     {sorted(est.causal_graph_.edges())}")
+
+# ========
+# NumPy
+# ========
+numpy_array = df.to_numpy()
+est_numpy = ChowLiuNew()
+est_numpy.fit(numpy_array)
+print(f"Learned Edges(numpy):   {sorted(est_numpy.causal_graph_.edges())}")
+
+# ========
+# Polars
+# ========
+polars_data = pl.DataFrame(df)
+est_polars = ChowLiuNew()
+est_polars.fit(nw.from_native(polars_data))
+print(f"Learned Edges(polars):  {sorted(est_polars.causal_graph_.edges())}")
+
+# ========
+# Pyarrow
+# ========
+pyarrow_data = pa.Table.from_pandas(df, preserve_index=False)
+est_pyarrow = ChowLiuNew()
+est_pyarrow.fit(nw.from_native(pyarrow_data))
+print(f"Learned Edges(pyarrow): {sorted(est_pyarrow.causal_graph_.edges())}")
+
+# ========
+# Modin
+# ========
+modin_data = mpd.DataFrame(df)
+est_modin = ChowLiuNew()
+est_modin.fit(nw.from_native(modin_data))
+print(f"Learned Edges(modin):   {sorted(est_modin.causal_graph_.edges())}")
+
+# ========
+# cuDF
+# ========
+cudf_data = cd.DataFrame(df)
+est_cudf = ChowLiuNew()
+est_cudf.fit(nw.from_native(cudf_data))
+print(f"Learned Edges(cudf):    {sorted(est_cudf.causal_graph_.edges())}")
