@@ -11,7 +11,7 @@ It complements the maintainer's architectural design in **[`PR #14`](https://git
 pgmpy currently hardcodes `pandas.DataFrame` as the only accepted tabular input type across its entire public API-parameter estimators, conditional independence tests, structure scores, causal discovery algorithms, and model-level methods like `fit()`, `predict()`, and `simulate()`.
 
 This creates several practical problems like:
-1. **Ecosystem lock-in.** Users working with **[`Polars`](https://github.com/pola-rs/polars)** , **[`PyArrow`](https://github.com/apache/arrow)** , **[`cuDF`](https://github.com/rapidsai/cudf)** or **[`Modin`](https://github.com/modin-project/modin)** must manually convert their data to pandas before calling any pgmpy function, and convert back afterward.
+1. **Ecosystem lock-in.** Users working with **[`Polars`](https://github.com/pola-rs/polars)** , **[`PyArrow`](https://github.com/apache/arrow)** , **[`cuDF`](https://github.com/NVIDIA/cudf)** or **[`Modin`](https://github.com/modin-project/modin)** must manually convert their data to pandas before calling any pgmpy function, and convert back afterward.
 
 2. **Unnecessary full pandas conversions.** Converting third-party DataFrames (e.g., Polars, PyArrow, cuDF) to pandas duplicates data in memory and forces users to pay the conversion overhead upfront. Supporting Narwhals lets pgmpy skip the full pandas conversion entirely, allowing each backend to perform column encoding natively.
 
@@ -69,29 +69,52 @@ Wrap DataFrames at entry points, operate through narwhals' common API internally
 
 The migration is organized by module. Each module below can be migrated as a separate backward-compatible PR(as advised). The modules are listed in dependency order - earlier modules have no dependencies on later ones, so they can be merged first.
 
-The narwhals boundary is simple: `nw.from_native(data, eager_only=True)` is called once at each entry gate. There are two entry gates - one for estimators (`_initialize_fit` in `base.py`) and one for CI tests (`__init__` in `power_divergence.py`). Eager-only enforcement ensures that if an uncollected LazyFrame (e.g. `polars.LazyFrame`) is passed, Narwhals immediately raises a clear error rather than failing unexpectedly downstream. Everything downstream receives an eager narwhals DataFrame and works with the narwhals API. At the numpy boundary (TabularCPD, `np.bincount`), data gets converted to numpy arrays and narwhals is no longer involved.
+> **Note on Phasing & Scope:** Following architectural guidance from the maintainer, the initial implementation phase prioritizes **Causal Discovery algorithms** (`pgmpy/causal_discovery/`) and **Conditional Independence tests** (`pgmpy/ci_tests/`). Parameter estimators and CPDs are currently undergoing an architectural changes in [Proposal #7: CPD Refactor](https://github.com/pgmpy/enhancement_proposals/tree/main/7_cpd_refactor); estimators will also be updated to Narwhals following the completion of that refactor.
+
+The narwhals boundary is simple: `nw.from_native(data, eager_only=True)` is called once at each entry gate. There are three entry gates
+1. Causal Discovery algorithms (`_check_fit_data` in `BaseCausalDiscovery`)
+2. CI tests (`__init__` in `power_divergence.py`)
+3. Parameter estimators (`_initialize_fit` in `base.py`)
+
+Eager-only enforcement ensures that if an uncollected LazyFrame (e.g. `polars.LazyFrame`) is passed, Narwhals immediately raises a clear error rather than failing unexpectedly downstream. Everything downstream receives an eager narwhals DataFrame and works with the narwhals API. At the numerical boundary (e.g., `mutual_info_score`, `TabularCPD`, `np.bincount`), data gets converted to numpy arrays and narwhals is no longer involved.
 
 ```
 Runtime data flow:
 
-  User passes pandas/polars/pyarrow DataFrame
+  User passes pandas/polars/pyarrow DataFrame or 2D array
                     |
                     v
   Entry Gate: nw.from_native(data, eager_only=True)
-  (base.py _initialize_fit  OR  power_divergence.py __init__)
+  (causal_discovery base.py  OR  ci_tests __init__  OR  estimator base.py)
                     |
                     v
   Internal functions use narwhals API
-  (preprocess_data, collect_state_names, get_state_counts, etc.)
+  (validation, column extraction, preprocess_data, get_state_counts, etc.)
                     |
                     v
   Numpy Boundary: .to_numpy() / np.array()
-  (TabularCPD, bincount)
+  (mutual_info_score, TabularCPD, bincount)
 ```
 
 ---
 
+#### Module: `pgmpy/causal_discovery/` (Base and Tree Search)
+
+**Depends on:** Nothing (leaf module)
+
+**Classes to migrate:** [`BaseCausalDiscovery`](pgmpy/causal_discovery/base.py), [`ChowLiu`](pgmpy/causal_discovery/trees.py)
+
+Causal discovery algorithms learn DAG structures from observational data. By establishing `BaseCausalDiscovery` with Narwhals validation, all algorithms automatically accept `pandas`, `polars`, `pyarrow`, `cudf`, `modin`, and 2D NumPy arrays
+
+Tree-search algorithms (`ChowLiu`) compute pairwise mutual information directly from Narwhals column vectors, avoiding the overhead of constructing an intermediate pandas adjacency DataFrame
+
+> **POC Verification:** This design has been implemented and tested in `prototype.py`, achieving 100% exact edge parity across Pandas, Polars, PyArrow, Modin, cuDF (GPU), and NumPy on the Asia, Sachs, and Cancer datasets.
+
+---
+
 #### Module: `pgmpy/utils/tabular.py`
+
+> **Note on Estimator Migration:** Parameter estimators and CPDs are currently undergoing an active refactoring in [Proposal #7: CPD Refactor](https://github.com/pgmpy/enhancement_proposals/tree/main/7_cpd_refactor). The estimator and tabular utilities below will also be updated to Narwhals following the completion of that refactor.
 
 **Depends on:** Nothing (leaf module)
 
@@ -460,25 +483,34 @@ for col in df.columns:
 
 #### Rollout Summary
 
-Each module above is a separate PR. The table below shows the merge order:
+The implementation is phased to prioritize causal discovery first, with parameter estimators updated alongside/after the ongoing refactor:
 
-| PR | Module | Backward Compatible |
-|----|--------|---------------------|
-| 1 | `pgmpy/utils/tabular.py` | Yes |
-| 2 | `pgmpy/utils/utils.py` | Yes |
-| 3 | `pgmpy/parameter_estimator/base.py` | Yes (depends on PR 1, 2) |
-| 4 | `pgmpy/parameter_estimator/discrete_mle.py` | Yes (depends on PR 3) |
-| 5 | `pgmpy/ci_tests/power_divergence.py` | Yes (independent) |
-| 6 | `pgmpy/models/DiscreteBayesianNetwork.py` | Yes (depends on PR 3, 4) |
+**Phase 1: Causal Discovery & Independence Testing (Initial Focus)**
+
+| Scope | Module | Backward Compatible |
+|-------|--------|---------------------|
+| Causal Discovery | `pgmpy/causal_discovery/base.py` (`BaseCausalDiscovery`) | Yes |
+| Causal Discovery | `pgmpy/causal_discovery/trees.py` (`ChowLiu`, `_TreeSearchMixin`) | Yes |
+| CI Tests | `pgmpy/ci_tests/power_divergence.py` (`ChiSquare`, `PowerDivergence`) | Yes |
+| Causal Discovery | `pgmpy/causal_discovery/pc.py` (`PC`) | Yes |
+
+**Phase 2: Tabular Utilities & Parameter Estimators**
+*(Aligned with [Proposal #7: CPD Refactor](https://github.com/pgmpy/enhancement_proposals/tree/main/7_cpd_refactor))*
+
+| Scope | Module | Backward Compatible |
+|-------|--------|---------------------|
+| Tabular Utilities | `pgmpy/utils/tabular.py` & `utils.py` | Yes |
+| Parameter Estimators | `pgmpy/parameter_estimator/base.py` & `discrete_mle.py` | Yes |
+| Models | `pgmpy/models/DiscreteBayesianNetwork.py` | Yes |
 
 After the pilot modules above, the same pattern extends to the rest of the codebase:
 
 | Scope | Modules |
 |-------|---------|
-| Remaining parameter estimators | `discrete_bayesian.py`, `discrete_em.py`, `linear_gaussian_mle.py` |
 | Remaining CI tests | `fisher_z.py`, `pearsonr.py`, `pillai_trace.py` |
 | Structure scores | `BDeu`, `BDs`, `BIC`, `AIC`, `K2`, `LogLikelihood` |
-| Causal discovery | `PC`, `GES`, `HillClimbSearch`, `ChowLiu` |
+| Remaining causal discovery | `GES`, `HillClimbSearch` |
+| Remaining parameter estimators | `discrete_bayesian.py`, `discrete_em.py`, `linear_gaussian_mle.py` |
 
 ---
 
@@ -564,4 +596,22 @@ from pgmpy.causal_discovery import PC
 data = pl.read_csv("my_dataset.csv")
 model = PC(ci_test="chi_square").fit(data)
 print(model.edges())
+```
+
+#### 6. Tree-Search Causal Discovery with `ChowLiu` (Polars, cuDF GPU, 2D NumPy)
+
+```python
+import polars as pl
+from pgmpy.causal_discovery import ChowLiu
+
+# Zero-copy ingestion directly from Polars
+df = pl.read_csv("sachs_discrete.csv")
+model = ChowLiu().fit(df)
+print("Learned Tree Edges:", model.causal_graph_.edges())
+
+# Seamlessly accepts 2D NumPy arrays:
+import numpy as np
+X = np.random.randint(0, 3, size=(500, 6))
+model_np = ChowLiu().fit(X)
+print("Learned Edges from NumPy:", model_np.causal_graph_.edges())
 ```
