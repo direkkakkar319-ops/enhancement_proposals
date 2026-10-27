@@ -14,27 +14,10 @@ import pandas as pd
 import polars as pl
 from sklearn.base import BaseEstimator
 from sklearn.metrics import mutual_info_score
+from sklearn.utils.validation import validate_data
 
 import narwhals.stable.v2 as nw
 from pgmpy.base import DAG
-
-# Upstream Narwhals compatibility fix:
-# ----- (will be removed after this is fixed: https://github.com/narwhals-dev/narwhals/issues/4089)
-try:
-    from narwhals._pandas_like import utils as _nw_utils
-
-    _orig_is_dtype_pyarrow = _nw_utils.is_dtype_pyarrow
-
-    def _safe_is_dtype_pyarrow(dtype):
-        try:
-            return _orig_is_dtype_pyarrow(dtype)
-        except TypeError:
-            return False
-
-    _nw_utils.is_dtype_pyarrow = _safe_is_dtype_pyarrow
-except Exception:
-    pass
-# -----
 
 
 class BaseCausalDiscovery(BaseEstimator):
@@ -46,22 +29,32 @@ class BaseCausalDiscovery(BaseEstimator):
         tags.target_tags.required = False
         return tags
 
-    def _check_fit_data(self, X):
+    def _check_fit_data(self, X) -> nw.DataFrame:
         """
         DataFrame-agnostic validation via Narwhals.
         Accepts: pandas, Polars, PyArrow, Modin, cuDF, or 2D numpy arrays.
         """
-        if isinstance(X, np.ndarray):
-            if X.ndim != 2:
-                raise ValueError(f"Expected 2D array, got shape {X.shape}")
-            cols = [f"x{i}" for i in range(X.shape[1])]
-            X = pd.DataFrame(X, columns=cols)
+        # Run scikit-learn validate_data for NumPy and Pandas inputs
+        if isinstance(X, (np.ndarray, pd.DataFrame)):
+            validate_data(
+                self,
+                X=X,
+                dtype=None,
+                accept_sparse=False,
+                ensure_all_finite=True,
+                reset=True,
+            )
+            if isinstance(X, np.ndarray):
+                cols = [f"x{i}" for i in range(X.shape[1])]
+                X = pd.DataFrame(X, columns=cols)
 
         nw_df = X if isinstance(X, nw.DataFrame) else nw.from_native(X, eager_only=True)
 
         n_samples, n_features = nw_df.shape
         if n_features < 1 or n_samples < 2:
-            raise ValueError(f"Invalid shape: {nw_df.shape}")
+            raise ValueError(
+                f"Invalid shape: {nw_df.shape}. Expected at least 2 samples and 1 feature."
+            )
 
         for col in nw_df.columns:
             s = nw_df.get_column(col)
